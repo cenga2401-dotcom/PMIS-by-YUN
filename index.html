@@ -1,0 +1,241 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ESG / ISO 顧問案件管理系統</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div id="loading" class="loading-screen">
+    <div class="loader"></div>
+    <p>系統載入中</p>
+  </div>
+
+  <div class="app-shell">
+    <aside class="sidebar">
+      <div class="brand">
+        <span class="brand-mark">E</span>
+        <div>
+          <strong>ESG ISO</strong>
+          <small>Consulting Suite</small>
+        </div>
+      </div>
+      <nav class="nav">
+        <button class="nav-link active" data-view="dashboard">Dashboard</button>
+        <button class="nav-link" data-view="calendar">月曆</button>
+        <button class="nav-link" data-view="tasks">今日工作</button>
+        <button class="nav-link" data-view="projects">專案列表</button>
+      </nav>
+    </aside>
+
+    <main class="main">
+      <header class="topbar">
+        <button id="menuToggle" class="icon-button menu-button" title="開啟選單">☰</button>
+        <div>
+          <h1 id="pageTitle">Dashboard</h1>
+          <p id="pageSubtitle">ESG / ISO 顧問案件管理總覽</p>
+        </div>
+        <div class="topbar-actions">
+          <button id="themeToggle" class="icon-button" title="切換深色模式">◐</button>
+          <button id="newProjectBtn" class="primary-button">New Project</button>
+        </div>
+      </header>
+
+      <section id="dashboardView" class="view active">
+        <article class="panel dashboard-search-panel">
+          <div class="panel-header">
+            <h2>全域搜尋</h2>
+          </div>
+          <input id="dashboardSearch" type="search" placeholder="搜尋案件編號、客戶、專案名稱">
+          <div id="dashboardSearchResults" class="search-results"></div>
+        </article>
+        <div id="metricGrid" class="metric-grid"></div>
+        <div class="chart-grid">
+          <article class="panel">
+            <div class="panel-header">
+              <h2>案件狀態統計</h2>
+            </div>
+            <canvas id="statusChart" height="220"></canvas>
+          </article>
+          <article class="panel wide">
+            <div class="panel-header">
+              <h2>每月案件數 / 結案件數</h2>
+            </div>
+            <canvas id="monthlyChart" height="240"></canvas>
+          </article>
+        </div>
+      </section>
+
+      <section id="calendarView" class="view">
+        <div class="calendar-layout">
+          <article class="panel calendar-panel">
+            <div class="calendar-toolbar">
+              <button id="prevPeriod" class="icon-button" title="上一個期間">‹</button>
+              <h2 id="calendarTitle"></h2>
+              <button id="nextPeriod" class="icon-button" title="下一個期間">›</button>
+              <div class="segmented">
+                <button id="monthMode" class="active">月</button>
+                <button id="weekMode">週</button>
+              </div>
+            </div>
+            <div id="calendarGrid" class="calendar-grid"></div>
+          </article>
+          <aside class="panel date-detail">
+            <div class="panel-header">
+              <h2 id="selectedDateTitle">日期詳情</h2>
+              <button id="calendarDetailToggle" class="ghost-button">Collapse</button>
+            </div>
+            <div id="selectedDateProjects" class="date-project-list"></div>
+          </aside>
+        </div>
+      </section>
+
+      <section id="tasksView" class="view">
+        <article class="panel">
+          <div class="panel-header">
+            <h2>今日工作</h2>
+            <form id="taskForm" class="inline-form">
+              <input id="taskInput" type="text" placeholder="新增今日工作" required>
+              <button class="primary-button" type="submit">新增</button>
+            </form>
+          </div>
+          <ul id="taskList" class="task-list"></ul>
+        </article>
+      </section>
+
+      <section id="projectsView" class="view">
+        <article class="panel">
+          <div class="project-tabs segmented">
+            <button id="activeProjectsTab" class="active" type="button">進行中專案</button>
+            <button id="historyProjectsTab" type="button">歷史專區</button>
+          </div>
+          <div class="filter-bar">
+            <input id="projectSearch" type="search" placeholder="關鍵字搜尋">
+            <select id="statusFilter">
+              <option value="all">全部狀態</option>
+            </select>
+            <select id="typeFilter">
+              <option value="all">全部類型</option>
+            </select>
+            <select id="ownerFilter">
+              <option value="all">全部負責人</option>
+            </select>
+            <input id="clientFilter" type="search" placeholder="客戶名稱">
+            <label>開始起<input id="startFromFilter" type="date"></label>
+            <label>開始迄<input id="startToFilter" type="date"></label>
+            <label>截止起<input id="dueFromFilter" type="date"></label>
+            <label>截止迄<input id="dueToFilter" type="date"></label>
+            <select id="sortKeySelect">
+              <option value="code">依案件編號</option>
+              <option value="startDate">依開始日期</option>
+              <option value="dueDate">依截止日期</option>
+              <option value="client">依客戶名稱</option>
+              <option value="name">依專案名稱</option>
+              <option value="owner">依負責人</option>
+              <option value="completedDate">依完成日期</option>
+            </select>
+            <select id="sortDirectionSelect">
+              <option value="asc">升冪</option>
+              <option value="desc">降冪</option>
+            </select>
+            <button id="clearFiltersBtn" class="ghost-button" type="button">清除篩選</button>
+          </div>
+          <details class="status-manager">
+            <summary>自訂專案狀態</summary>
+            <form id="statusForm" class="inline-form">
+              <input id="statusNameInput" type="text" placeholder="新增狀態名稱" required>
+              <button class="primary-button" type="submit">新增</button>
+            </form>
+            <div id="statusList" class="status-list"></div>
+          </details>
+          <div class="table-tools">
+            <span id="projectListHint">進行中專案</span>
+          </div>
+          <div class="table-wrap">
+            <table class="project-table">
+              <thead id="projectTableHead">
+                <tr>
+                  <th data-sort="code">案件編號</th>
+                  <th data-sort="client">客戶</th>
+                  <th data-sort="name">專案名稱</th>
+                  <th data-sort="type">專案類型</th>
+                  <th data-sort="startDate">開始日</th>
+                  <th data-sort="dueDate">截止日</th>
+                  <th data-sort="status">目前狀態</th>
+                  <th data-sort="progress">完成率</th>
+                  <th data-sort="owner">負責人</th>
+                  <th>操作</th>
+                </tr>
+              </thead>
+              <tbody id="projectTableBody"></tbody>
+            </table>
+          </div>
+        </article>
+      </section>
+
+      <section id="fullProjectView" class="view">
+        <div id="fullProjectContent" class="full-project-content"></div>
+      </section>
+    </main>
+  </div>
+
+  <div id="projectDetail" class="detail-drawer" aria-hidden="true">
+    <div class="drawer-backdrop" data-close-detail></div>
+    <article class="drawer-panel">
+      <header class="drawer-header">
+        <div class="inspector-title">
+          <small id="detailCode"></small>
+          <h2 id="detailName"></h2>
+          <div class="inspector-meta">
+            <span id="detailType"></span>
+            <span id="detailStatus"></span>
+          </div>
+        </div>
+        <div class="inspector-controls">
+          <button id="detailCollapseBtn" class="icon-button" title="收合">‹</button>
+          <button id="detailPinBtn" class="icon-button" title="固定">⌖</button>
+          <button class="icon-button" data-close-detail title="關閉">×</button>
+        </div>
+      </header>
+      <div id="detailContent" class="drawer-content"></div>
+    </article>
+  </div>
+
+  <dialog id="projectModal" class="modal">
+    <form id="projectForm" method="dialog">
+      <div class="modal-header">
+        <h2>新增案件</h2>
+        <button class="icon-button" type="button" data-close-modal>×</button>
+      </div>
+      <div class="form-grid">
+        <label>案件編號<input name="code" required></label>
+        <label>客戶<input name="client" required></label>
+        <label>案件名稱<input name="name" required></label>
+        <label>專案類型<select name="type" id="projectTypeSelect" required></select></label>
+        <label>開始日期<input name="startDate" type="date" required></label>
+        <label>截止日期<input name="dueDate" type="date" required></label>
+        <label>負責人<input name="owner" required></label>
+      </div>
+      <footer class="modal-actions">
+        <button type="button" class="ghost-button" data-close-modal>取消</button>
+        <button type="submit" class="primary-button">建立案件</button>
+      </footer>
+    </form>
+  </dialog>
+
+  <dialog id="confirmDialog" class="modal confirm-modal">
+    <div class="modal-header">
+      <h2 id="confirmTitle">確認</h2>
+    </div>
+    <p id="confirmMessage"></p>
+    <footer class="modal-actions">
+      <button id="confirmCancel" class="ghost-button">取消</button>
+      <button id="confirmOk" class="danger-button">確認</button>
+    </footer>
+  </dialog>
+
+  <div id="toastHost" class="toast-host"></div>
+  <script src="script.js"></script>
+</body>
+</html>
