@@ -35,12 +35,16 @@ class ESGApp {
       ISO14067: ["BOM", "製程流程", "LCA建模", "碳足跡計算", "初稿", "修正", "查驗", "碳標籤", "結案"],
       ISO50001: ["能源審查", "EnPI", "Baseline", "改善方案", "文件建立", "內部稽核", "管理審查", "驗證", "結案"]
     };
+    this.milestoneTemplate = ["客戶立案", "請頭款", "頭款已收", "執行專案", "請尾款", "尾款已收", "結案"];
     this.state = this.migrate(this.storage.load() || this.createDemoData());
     this.activeView = "dashboard";
     this.projectTab = "active";
     this.calendarDate = new Date();
     this.calendarMode = "month";
     this.calendarDetailCollapsed = false;
+    this.calendarPopoverDate = "";
+    this.selectedCalendarProjectId = null;
+    this.quickActivityExpanded = false;
     this.selectedDate = this.toDateInput(new Date());
     this.selectedProjectId = null;
     this.detailTab = "tasks";
@@ -143,6 +147,25 @@ class ESGApp {
       project.progress = Number.isFinite(project.progress) ? project.progress : 0;
       project.completedDate = project.completedDate || "";
       project.checklist = Array.isArray(project.checklist) ? project.checklist : [];
+      project.tasks = Array.isArray(project.tasks) ? project.tasks : [];
+      project.activities = Array.isArray(project.activities) ? project.activities : [];
+      if (!Array.isArray(project.activityLogs)) {
+        project.activityLogs = [];
+        project.activities.forEach(activity => {
+          project.activityLogs.push(this.createActivityLog(
+            project,
+            "legacy_activity_imported",
+            activity.action || "匯入既有紀錄",
+            activity.content || "舊活動紀錄匯入系統",
+            {},
+            activity.date || project.startDate || this.today(),
+            activity.time || "00:00"
+          ));
+        });
+        if (!project.activityLogs.length) {
+          project.activityLogs.push(this.createActivityLog(project, "legacy_project_imported", "匯入既有案件", "舊資料匯入系統", {}, project.startDate || this.today()));
+        }
+      }
       project.notes = Array.isArray(project.notes) ? project.notes : [];
       project.attachments = Array.isArray(project.attachments) ? project.attachments : [];
       project.timeline = Array.isArray(project.timeline) ? project.timeline : [];
@@ -182,8 +205,11 @@ class ESGApp {
       this.dom.typeFilter.add(new Option(type, type));
     });
     this.dom.typeFilter.value = this.projectTypes.includes(selectedType) ? selectedType : "all";
+    this.dom.sortKeySelect.value = this.sort.key;
+    this.dom.sortDirectionSelect.value = this.sort.direction;
     this.renderStatusOptions();
     this.renderOwnerOptions();
+    this.updateSortDirectionLabels();
   }
 
   /** Renders status filter options from the custom status catalog. */
@@ -267,7 +293,7 @@ class ESGApp {
 
   /** Builds one demo project with related tasks, notes, attachments, and timeline. */
   demoProject(code, client, name, type, startDate, dueDate, status, progress, owner) {
-    const template = this.checklistTemplates[type] || ["需求確認", "資料收集", "文件建立", "客戶確認", "結案"];
+    const template = this.milestoneTemplate;
     const doneCount = Math.round(template.length * progress / 100);
     return {
       id: this.uid(),
@@ -285,6 +311,11 @@ class ESGApp {
       progress,
       completedDate: status === "Completed" ? dueDate : "",
       checklist: template.map((title, index) => ({ id: this.uid(), title, done: index < doneCount })),
+      tasks: [
+        { id: this.uid(), title: "修改報告", done: false },
+        { id: this.uid(), title: "客戶確認", done: false },
+        { id: this.uid(), title: "安排查驗", done: false }
+      ],
       notes: [{ id: this.uid(), date: this.toDateInput(new Date()), time: "09:30", text: "今天收到天然氣資料" }],
       attachments: [{ id: this.uid(), name: "資料清單", description: "客戶需提供文件", link: "https://example.com" }],
       timeline: ["建立案件", "Kickoff", "第一次輔導", "收資料", "初稿", "查驗", "結案"].map((title, index) => ({
@@ -593,8 +624,26 @@ class ESGApp {
     this.dom.calendarLayout.classList.toggle("detail-collapsed", this.calendarDetailCollapsed);
     this.dom.calendarDetailToggle.textContent = this.calendarDetailCollapsed ? "Expand" : "Collapse";
     this.dom.calendarGrid.innerHTML = weekdays.map(day => `<div class="weekday">${day}</div>`).join("") + dates.map(date => this.renderDayCell(date)).join("");
-    this.dom.calendarGrid.querySelectorAll(".day-cell").forEach(cell => cell.addEventListener("click", () => {
+    this.dom.calendarGrid.querySelectorAll(".day-cell").forEach(cell => cell.addEventListener("click", event => {
+      if (event.target.closest("button")) return;
       this.selectedDate = cell.dataset.date;
+      this.selectedCalendarProjectId = null;
+      this.calendarPopoverDate = "";
+      this.renderCalendar();
+    }));
+    this.dom.calendarGrid.querySelectorAll("[data-calendar-project]").forEach(button => button.addEventListener("click", event => {
+      event.stopPropagation();
+      this.selectedCalendarProjectId = button.dataset.calendarProject;
+      this.selectedDate = button.dataset.date;
+      this.calendarPopoverDate = "";
+      this.quickActivityExpanded = false;
+      this.renderCalendar();
+    }));
+    this.dom.calendarGrid.querySelectorAll("[data-calendar-more]").forEach(button => button.addEventListener("click", event => {
+      event.stopPropagation();
+      this.calendarPopoverDate = this.calendarPopoverDate === button.dataset.calendarMore ? "" : button.dataset.calendarMore;
+      this.selectedDate = button.dataset.calendarMore;
+      this.selectedCalendarProjectId = null;
       this.renderCalendar();
     }));
     this.renderSelectedDate();
@@ -628,12 +677,29 @@ class ESGApp {
     const dateText = this.toDateInput(date);
     const projects = this.projectsOnDate(dateText).filter(project => project.status !== "Completed");
     const isMuted = this.calendarMode === "month" && date.getMonth() !== this.calendarDate.getMonth();
-    const pills = projects.slice(0, 3).map(project => `<span class="event-pill" style="background:${this.getStatus(project.status).color}">${this.escape(project.name)}</span>`).join("");
-    const more = projects.length > 3 ? `<span class="event-pill" style="background:#64748b">+${projects.length - 3} More</span>` : "";
+    const pills = projects.slice(0, 3).map(project => `<button class="event-pill" data-calendar-project="${project.id}" data-date="${dateText}" style="background:${this.getStatus(project.status).color}">${this.escape(project.name)}</button>`).join("");
+    const more = projects.length > 3 ? `<button class="event-pill more-pill" data-calendar-more="${dateText}" style="background:#64748b">+${projects.length - 3} More</button>` : "";
+    const popover = this.calendarPopoverDate === dateText ? this.renderCalendarPopover(dateText, projects) : "";
     return `
       <div class="day-cell ${isMuted ? "muted" : ""} ${dateText === this.selectedDate ? "selected" : ""}" data-date="${dateText}">
         <div class="day-number"><span>${date.getDate()}</span></div>
         ${pills}${more}
+        ${popover}
+      </div>
+    `;
+  }
+
+  /** Returns the popover listing all projects on a crowded calendar day. */
+  renderCalendarPopover(dateText, projects) {
+    return `
+      <div class="calendar-popover">
+        <strong>${this.formatDate(dateText)}</strong>
+        <small>共 ${projects.length} 個案件</small>
+        <div>${projects.map(project => `
+          <button data-calendar-project="${project.id}" data-date="${dateText}">
+            <span style="background:${this.getStatus(project.status).color}"></span>
+            ${this.escape(project.client)} ${this.escape(project.type)}
+          </button>`).join("")}</div>
       </div>
     `;
   }
@@ -647,15 +713,24 @@ class ESGApp {
   renderSelectedDate() {
     const projects = this.projectsOnDate(this.selectedDate).filter(project => project.status !== "Completed");
     this.dom.selectedDateTitle.textContent = `${this.formatDate(this.selectedDate)} 快速檢視`;
-    this.dom.selectedDateProjects.innerHTML = projects.length ? projects.map(project => this.renderCalendarQuickView(project)).join("") : `<p>這一天沒有進行中的案件。</p>`;
+    const selectedProject = projects.find(project => project.id === this.selectedCalendarProjectId);
+    this.dom.selectedDateProjects.innerHTML = selectedProject
+      ? this.renderCalendarQuickView(selectedProject)
+      : `<p>${projects.length ? "請點選月曆中的案件查看進度。" : "這一天沒有進行中的案件。"}</p>`;
     this.dom.selectedDateProjects.querySelectorAll("[data-full-project]").forEach(button => {
       button.addEventListener("click", () => this.openFullProjectDetail(button.dataset.fullProject));
+    });
+    this.dom.selectedDateProjects.querySelectorAll("[data-view-all-activity]").forEach(button => {
+      button.addEventListener("click", () => {
+        this.quickActivityExpanded = true;
+        this.renderSelectedDate();
+      });
     });
   }
 
   /** Returns a calendar quick view card for read-only project status review. */
   renderCalendarQuickView(project) {
-    const unfinished = project.checklist.filter(item => !item.done).slice(0, 5);
+    const unfinished = this.getProjectTasks(project).filter(item => !item.done).slice(0, 5);
     return `
       <article class="quick-view-card">
         <header class="quick-view-header">
@@ -664,11 +739,12 @@ class ESGApp {
         </header>
         <dl class="quick-view-meta">
           <div><dt>客戶</dt><dd>${this.escape(project.client)}</dd></div>
+          <div><dt>專案類型</dt><dd>${this.escape(project.type)}</dd></div>
           <div><dt>開始日期</dt><dd>${this.formatDate(project.startDate)}</dd></div>
           <div><dt>預計完成</dt><dd>${this.formatDate(project.dueDate)}</dd></div>
         </dl>
         <div class="quick-view-block">
-          <strong>案件進度摘要</strong>
+          <strong>案件流程 Milestone</strong>
           <ul class="quick-progress-list">${this.renderProgressSummary(project)}</ul>
         </div>
         <div class="quick-view-block">
@@ -693,25 +769,103 @@ class ESGApp {
 
   /** Builds a compact activity timeline from existing project data. */
   renderActivityTimeline(project) {
-    const activities = this.buildActivities(project).slice(0, 6);
+    const activities = this.buildActivities(project).slice(0, this.quickActivityExpanded ? 999 : 10);
     if (!activities.length) return `<p>尚無工作歷程。</p>`;
-    return activities.map(item => `
+    const rows = activities.map(item => `
       <div class="activity-item">
-        <time>${this.formatDate(item.date)} ${item.time || ""}</time>
-        <span>${this.escape(item.action)}</span>
-        <strong>${this.escape(item.content)}</strong>
+        <time>${this.formatActivityDateTime(item)}</time>
+        <span>${this.escape(item.title)}</span>
+        <strong>${this.escape(item.description)}</strong>
       </div>
     `).join("");
+    const all = this.buildActivities(project).length;
+    const toggle = all > 10 && !this.quickActivityExpanded ? `<button class="ghost-button quick-activity-all" data-view-all-activity="${project.id}">查看全部</button>` : "";
+    return rows + toggle;
   }
 
   /** Derives readable activity entries without changing the stored project schema. */
   buildActivities(project) {
+    const logs = this.getProjectActivityLogs(project);
+    if (logs.length) return logs.slice().sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+    return this.buildLegacyActivities(project);
+  }
+
+  /** Builds fallback timeline entries for very old records without activity logs. */
+  buildLegacyActivities(project) {
     const activities = [];
-    project.notes.forEach(note => activities.push({ date: note.date, time: note.time, action: "新增備註", content: note.text }));
-    project.attachments.forEach(file => activities.push({ date: project.startDate, time: "", action: "新增附件", content: file.name }));
-    project.checklist.filter(item => item.done).forEach(item => activities.push({ date: project.startDate, time: "", action: "完成", content: item.title }));
-    project.timeline.filter(item => item.date).forEach(item => activities.push({ date: item.date, time: "", action: item.done ? "完成階段" : "安排階段", content: item.title }));
-    return activities.sort((a, b) => `${b.date} ${b.time}`.localeCompare(`${a.date} ${a.time}`));
+    project.notes.forEach(note => activities.push(this.legacyActivity(project, "note_created", "新增備註", this.truncate(note.text), note.date, note.time)));
+    project.attachments.forEach(file => activities.push(this.legacyActivity(project, "attachment_created", "新增附件", `新增附件：${file.name}`, project.startDate, "")));
+    this.getProjectTasks(project).forEach(task => activities.push(this.legacyActivity(project, task.done ? "task_completed" : "task_created", task.done ? "完成工作" : "新增工作", `${task.done ? "完成工作" : "新增工作"}：${task.title}`, task.date || project.startDate, task.time || "")));
+    project.checklist.filter(item => item.done).forEach(item => activities.push(this.legacyActivity(project, "milestone_completed", "完成案件流程", `完成流程：${item.title}`, project.startDate, "")));
+    project.timeline.filter(item => item.date).forEach(item => activities.push(this.legacyActivity(project, item.done ? "milestone_completed" : "milestone_created", item.done ? "完成案件流程" : "新增案件流程", item.title, item.date, "")));
+    return activities.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  }
+
+  /** Converts legacy date/time facts into a display-compatible activity log shape. */
+  legacyActivity(project, type, title, description, date, time) {
+    return this.createActivityLog(project, type, title, description, {}, date || project.startDate || this.today(), time || "00:00");
+  }
+
+  /** Returns project-level daily tasks while keeping older project records compatible. */
+  getProjectTasks(project) {
+    if (!Array.isArray(project.tasks)) project.tasks = [];
+    return project.tasks;
+  }
+
+  /** Returns formal project activity logs while keeping older project records compatible. */
+  getProjectActivityLogs(project) {
+    if (!Array.isArray(project.activityLogs)) project.activityLogs = [];
+    return project.activityLogs;
+  }
+
+  /** Creates one formal activity log object. */
+  createActivityLog(project, type, title, description, meta = {}, date = null, time = null) {
+    const createdAt = date
+      ? `${date}T${time || "00:00"}:00`
+      : this.localTimestamp();
+    return {
+      id: `act_${this.uid()}`,
+      projectId: project.id,
+      type,
+      title,
+      description,
+      createdAt,
+      createdBy: project.owner || "系統",
+      meta
+    };
+  }
+
+  /** Adds one formal activity log entry and avoids immediate duplicate logs. */
+  addActivityLog(project, type, title, description, meta = {}) {
+    const logs = this.getProjectActivityLogs(project);
+    const latest = logs[0];
+    if (latest && latest.type === type && latest.description === description && Date.now() - new Date(latest.createdAt).getTime() < 1200) return latest;
+    const log = this.createActivityLog(project, type, title, description, meta);
+    logs.unshift(log);
+    return log;
+  }
+
+  /** Keeps older helper calls compatible with the new activity log format. */
+  addProjectActivity(project, action, content) {
+    this.addActivityLog(project, "activity", action, content);
+  }
+
+  /** Shortens long user text for activity descriptions. */
+  truncate(text, limit = 50) {
+    const value = String(text || "");
+    return value.length > limit ? `${value.slice(0, limit)}...` : value;
+  }
+
+  /** Formats one activity log timestamp as yyyy/mm/dd HH:mm. */
+  formatActivityDateTime(log) {
+    const [date = "", time = ""] = String(log.createdAt || "").split("T");
+    return `${this.formatDate(date)} ${time.slice(0, 5)}`.trim();
+  }
+
+  /** Returns a local timestamp without timezone conversion. */
+  localTimestamp() {
+    const now = new Date();
+    return `${this.toDateInput(now)}T${now.toTimeString().slice(0, 8)}`;
   }
 
   /** Renders today's task list. */
@@ -811,11 +965,14 @@ class ESGApp {
       status: "In Progress",
       progress: 0,
       completedDate: "",
-      checklist: (this.checklistTemplates[data.type] || ["需求確認", "資料收集", "文件建立", "客戶確認", "結案"]).map(title => ({ id: this.uid(), title, done: false })),
+      checklist: this.milestoneTemplate.map(title => ({ id: this.uid(), title, done: false })),
+      tasks: [],
+      activityLogs: [],
       notes: [],
       attachments: [],
       timeline: ["建立案件", "Kickoff", "第一次輔導", "收資料", "初稿", "查驗", "結案"].map((title, index) => ({ id: this.uid(), title, date: index === 0 ? data.startDate : "", done: index === 0 }))
     };
+    this.addActivityLog(project, "project_created", "建立案件", `建立案件：「${project.name}」`, { projectCode: project.code });
     this.state.projects.unshift(project);
     this.dom.projectModal.close();
     this.save();
@@ -839,6 +996,7 @@ class ESGApp {
     this.sort.key = key;
     this.dom.sortKeySelect.value = key;
     this.dom.sortDirectionSelect.value = this.sort.direction;
+    this.updateSortDirectionLabels();
     this.renderProjectTable();
   }
 
@@ -846,7 +1004,16 @@ class ESGApp {
   changeSortFromSelects() {
     this.sort.key = this.dom.sortKeySelect.value;
     this.sort.direction = this.dom.sortDirectionSelect.value;
+    this.updateSortDirectionLabels();
     this.renderProjectTable();
+  }
+
+  /** Updates sort direction labels to match date or text sorting. */
+  updateSortDirectionLabels() {
+    if (!this.dom?.sortKeySelect || !this.dom?.sortDirectionSelect) return;
+    const isDate = ["startDate", "dueDate", "completedDate"].includes(this.dom.sortKeySelect.value);
+    this.dom.sortDirectionSelect.options[0].textContent = isDate ? "最早→最晚" : "A→Z";
+    this.dom.sortDirectionSelect.options[1].textContent = isDate ? "最晚→最早" : "Z→A";
   }
 
   /** Clears all project filters. */
@@ -1046,6 +1213,7 @@ class ESGApp {
       <div class="full-detail-grid">
         ${this.renderFullBasicInfo(project)}
         ${this.renderFullChecklist(project)}
+        ${this.renderFullTasks(project)}
         ${this.renderFullNotes(project)}
         ${this.renderFullAttachments(project)}
         ${this.renderFullTimeline(project)}
@@ -1083,13 +1251,28 @@ class ESGApp {
   renderFullChecklist(project) {
     return `
       <section class="full-card">
-        <h3>工作事項</h3>
-        <form class="mini-form" data-add-checklist><input name="title" placeholder="新增工作事項" required><button class="primary-button">新增</button></form>
+        <h3>案件流程 Milestone</h3>
+        <form class="mini-form" data-add-checklist><input name="title" placeholder="新增流程節點" required><button class="primary-button">新增</button></form>
         <div class="compact-list">${project.checklist.map(item => `
-          <div class="compact-row ${item.done ? "done" : ""}">
+          <div class="compact-row ${item.done ? "done" : ""}" draggable="true" data-milestone-row="${item.id}">
             <label><input type="checkbox" data-check-toggle="${item.id}" ${item.done ? "checked" : ""}> <span>${this.escape(item.title)}</span></label>
-            <div class="task-actions"><button data-check-edit="${item.id}">改</button><button data-check-delete="${item.id}">×</button></div>
+            <div class="task-actions"><button data-check-edit="${item.id}">改</button><button data-check-delete="${item.id}">×</button><span class="drag-handle">↕</span></div>
           </div>`).join("")}</div>
+      </section>`;
+  }
+
+  /** Returns project-level task management separated from milestones. */
+  renderFullTasks(project) {
+    const tasks = this.getProjectTasks(project);
+    return `
+      <section class="full-card">
+        <h3>工作事項 Task</h3>
+        <form class="mini-form" data-add-project-task><input name="title" placeholder="例如：修改14064報告、客戶電話、收資料" required><button class="primary-button">新增</button></form>
+        <div class="compact-list">${tasks.map(task => `
+          <div class="compact-row ${task.done ? "done" : ""}">
+            <label><input type="checkbox" data-project-task-toggle="${task.id}" ${task.done ? "checked" : ""}> <span>${this.escape(task.title)}</span></label>
+            <div class="task-actions"><button data-project-task-edit="${task.id}">改</button><button data-project-task-delete="${task.id}">×</button></div>
+          </div>`).join("") || "<p>尚無工作事項。</p>"}</div>
       </section>`;
   }
 
@@ -1125,9 +1308,9 @@ class ESGApp {
     const activities = this.buildActivities(project);
     return `
       <section class="full-card">
-        <h3>Timeline</h3>
+        <h3>Activity Timeline</h3>
         <div class="compact-timeline">${activities.length ? activities.map(item => `
-          <div><time>${this.formatDate(item.date)}｜${item.time || "--:--"}</time><span>${this.escape(item.action)}｜${this.escape(item.content)}</span></div>`).join("") : "<p>尚無歷程。</p>"}</div>
+          <div><time>${this.formatActivityDateTime(item)}</time><span>${this.escape(item.title)}｜${this.escape(item.description)}</span></div>`).join("") : "<p>尚無歷程。</p>"}</div>
       </section>`;
   }
 
@@ -1138,15 +1321,25 @@ class ESGApp {
     document.getElementById("backToProjectsBtn").addEventListener("click", () => this.switchView("projects"));
     const metaForm = container.querySelector("[data-update-project-meta]");
     const checklistForm = container.querySelector("[data-add-checklist]");
+    const projectTaskForm = container.querySelector("[data-add-project-task]");
     const noteForm = container.querySelector("[data-add-note]");
     const attachmentForm = container.querySelector("[data-add-attachment]");
     if (metaForm) metaForm.addEventListener("submit", event => this.updateProjectMeta(event, project));
     if (checklistForm) checklistForm.addEventListener("submit", event => this.addChecklistItem(event, project));
+    if (projectTaskForm) projectTaskForm.addEventListener("submit", event => this.addProjectTask(event, project));
     if (noteForm) noteForm.addEventListener("submit", event => this.addNote(event, project));
     if (attachmentForm) attachmentForm.addEventListener("submit", event => this.addAttachment(event, project));
     container.querySelectorAll("[data-check-toggle]").forEach(input => input.addEventListener("change", () => this.toggleChecklist(project, input.dataset.checkToggle)));
     container.querySelectorAll("[data-check-edit]").forEach(button => button.addEventListener("click", () => this.editChecklist(project, button.dataset.checkEdit)));
     container.querySelectorAll("[data-check-delete]").forEach(button => button.addEventListener("click", () => this.deleteChecklist(project, button.dataset.checkDelete)));
+    container.querySelectorAll("[data-milestone-row]").forEach(row => {
+      row.addEventListener("dragstart", event => event.dataTransfer.setData("text/plain", row.dataset.milestoneRow));
+      row.addEventListener("dragover", event => event.preventDefault());
+      row.addEventListener("drop", event => this.reorderMilestone(event, project, row.dataset.milestoneRow));
+    });
+    container.querySelectorAll("[data-project-task-toggle]").forEach(input => input.addEventListener("change", () => this.toggleProjectTask(project, input.dataset.projectTaskToggle)));
+    container.querySelectorAll("[data-project-task-edit]").forEach(button => button.addEventListener("click", () => this.editProjectTask(project, button.dataset.projectTaskEdit)));
+    container.querySelectorAll("[data-project-task-delete]").forEach(button => button.addEventListener("click", () => this.deleteProjectTask(project, button.dataset.projectTaskDelete)));
     container.querySelectorAll("[data-note-delete]").forEach(button => button.addEventListener("click", () => this.deleteNote(project, button.dataset.noteDelete)));
     container.querySelectorAll("[data-attachment-delete]").forEach(button => button.addEventListener("click", () => this.deleteAttachment(project, button.dataset.attachmentDelete)));
     const closeButton = document.getElementById("closeProjectAction");
@@ -1350,8 +1543,16 @@ class ESGApp {
       this.toast("案件編號已存在。");
       return;
     }
+    const previousStatus = project.status;
+    const previousCode = project.code;
     project.code = data.code.trim();
     project.status = data.status;
+    if (previousStatus !== project.status) {
+      this.addActivityLog(project, "status_changed", "修改案件狀態", `${this.getStatus(previousStatus).name} → ${this.getStatus(project.status).name}`, { from: previousStatus, to: project.status });
+    }
+    if (previousCode !== project.code) {
+      this.addActivityLog(project, "project_updated", "修改案件資料", `案件編號：${previousCode} → ${project.code}`, { field: "code", from: previousCode, to: project.code });
+    }
     if (project.status !== "Completed") project.completedDate = "";
     if (project.status === "Completed" && !project.completedDate) project.completedDate = this.today();
     this.save();
@@ -1367,7 +1568,10 @@ class ESGApp {
   /** Adds a checklist item to a project. */
   addChecklistItem(event, project) {
     event.preventDefault();
-    project.checklist.push({ id: this.uid(), title: new FormData(event.target).get("title"), done: false });
+    const title = new FormData(event.target).get("title");
+    const milestone = { id: this.uid(), title, done: false };
+    project.checklist.push(milestone);
+    this.addActivityLog(project, "milestone_created", "新增案件流程", `新增流程：${title}`, { milestoneId: milestone.id });
     this.updateProgress(project);
     this.save();
     this.renderAll();
@@ -1377,6 +1581,7 @@ class ESGApp {
   toggleChecklist(project, id) {
     const item = project.checklist.find(task => task.id === id);
     item.done = !item.done;
+    this.addActivityLog(project, item.done ? "milestone_completed" : "milestone_reopened", item.done ? "完成案件流程" : "重新開啟案件流程", `${item.done ? "完成流程" : "重新開啟流程"}：${item.title}`, { milestoneId: item.id });
     this.updateProgress(project);
     this.save();
     this.renderAll();
@@ -1394,8 +1599,76 @@ class ESGApp {
 
   /** Deletes a checklist item. */
   deleteChecklist(project, id) {
+    const item = project.checklist.find(task => task.id === id);
     project.checklist = project.checklist.filter(task => task.id !== id);
+    if (item) this.addActivityLog(project, "milestone_deleted", "刪除項目", `刪除流程：${item.title}`, { milestoneId: id });
     this.updateProgress(project);
+    this.save();
+    this.renderAll();
+  }
+
+  /** Reorders milestone rows after drag and drop. */
+  reorderMilestone(event, project, targetId) {
+    event.preventDefault();
+    const sourceId = event.dataTransfer.getData("text/plain");
+    if (!sourceId || sourceId === targetId) return;
+    const sourceIndex = project.checklist.findIndex(item => item.id === sourceId);
+    const targetIndex = project.checklist.findIndex(item => item.id === targetId);
+    if (sourceIndex < 0 || targetIndex < 0) return;
+    const [moved] = project.checklist.splice(sourceIndex, 1);
+    project.checklist.splice(targetIndex, 0, moved);
+    this.save();
+    this.renderAll();
+  }
+
+  /** Adds a project-level task separated from milestones. */
+  addProjectTask(event, project) {
+    event.preventDefault();
+    const now = new Date();
+    const title = new FormData(event.target).get("title");
+    const task = {
+      id: this.uid(),
+      title,
+      done: false,
+      date: this.today(),
+      time: now.toTimeString().slice(0, 5)
+    };
+    this.getProjectTasks(project).unshift(task);
+    this.addActivityLog(project, "task_created", "新增工作", `新增工作：${title}`, { taskId: task.id });
+    this.save();
+    this.renderAll();
+  }
+
+  /** Toggles a project-level task as done or undone. */
+  toggleProjectTask(project, id) {
+    const task = this.getProjectTasks(project).find(item => item.id === id);
+    if (!task) return;
+    task.done = !task.done;
+    if (task.done) {
+      task.date = this.today();
+      task.time = new Date().toTimeString().slice(0, 5);
+    }
+    this.addActivityLog(project, task.done ? "task_completed" : "task_reopened", task.done ? "完成工作" : "重新開啟工作", `${task.done ? "完成工作" : "重新開啟工作"}：${task.title}`, { taskId: task.id });
+    this.save();
+    this.renderAll();
+  }
+
+  /** Edits a project-level task title. */
+  editProjectTask(project, id) {
+    const task = this.getProjectTasks(project).find(item => item.id === id);
+    if (!task) return;
+    const next = prompt("修改工作事項", task.title);
+    if (!next) return;
+    task.title = next.trim();
+    this.save();
+    this.renderAll();
+  }
+
+  /** Deletes a project-level task. */
+  deleteProjectTask(project, id) {
+    const task = this.getProjectTasks(project).find(item => item.id === id);
+    project.tasks = this.getProjectTasks(project).filter(item => item.id !== id);
+    if (task) this.addActivityLog(project, "task_deleted", "刪除項目", `刪除工作：${task.title}`, { taskId: id });
     this.save();
     this.renderAll();
   }
@@ -1405,14 +1678,18 @@ class ESGApp {
     event.preventDefault();
     const now = new Date();
     const data = Object.fromEntries(new FormData(event.target).entries());
-    project.notes.unshift({ id: this.uid(), date: data.date, time: now.toTimeString().slice(0, 5), text: data.text });
+    const note = { id: this.uid(), date: data.date, time: now.toTimeString().slice(0, 5), text: data.text };
+    project.notes.unshift(note);
+    this.addActivityLog(project, "note_created", "新增備註", this.truncate(data.text), { noteId: note.id });
     this.save();
     this.renderAll();
   }
 
   /** Deletes a daily note. */
   deleteNote(project, id) {
+    const note = project.notes.find(note => note.id === id);
     project.notes = project.notes.filter(note => note.id !== id);
+    if (note) this.addActivityLog(project, "note_deleted", "刪除項目", `刪除備註：${this.truncate(note.text)}`, { noteId: id });
     this.save();
     this.renderAll();
   }
@@ -1421,14 +1698,18 @@ class ESGApp {
   addAttachment(event, project) {
     event.preventDefault();
     const data = Object.fromEntries(new FormData(event.target).entries());
-    project.attachments.unshift({ id: this.uid(), ...data });
+    const attachment = { id: this.uid(), ...data };
+    project.attachments.unshift(attachment);
+    this.addActivityLog(project, "attachment_created", "新增附件", `新增附件：${data.name}`, { attachmentId: attachment.id });
     this.save();
     this.renderAll();
   }
 
   /** Deletes an attachment record. */
   deleteAttachment(project, id) {
+    const attachment = project.attachments.find(file => file.id === id);
     project.attachments = project.attachments.filter(file => file.id !== id);
+    if (attachment) this.addActivityLog(project, "attachment_deleted", "刪除項目", `刪除附件：${attachment.name}`, { attachmentId: id });
     this.save();
     this.renderAll();
   }
@@ -1495,7 +1776,9 @@ class ESGApp {
   async closeProject(project) {
     const ok = await this.confirm("Close Project", "確定要結案嗎？狀態將改為 Completed，並自動填入今天為完成日期。");
     if (!ok) return;
+    const previousStatus = project.status;
     project.status = "Completed";
+    this.addActivityLog(project, "project_closed", "專案結案", "專案已結案", { from: previousStatus, to: project.status });
     project.progress = 100;
     project.completedDate = this.today();
     project.checklist.forEach(item => item.done = true);
@@ -1510,8 +1793,10 @@ class ESGApp {
 
   /** Reopens a completed project and returns it to active projects. */
   reopenProject(project) {
+    const previousStatus = project.status;
     project.status = "In Progress";
     project.completedDate = "";
+    this.addActivityLog(project, "project_reopened", "重新開啟案件", "專案已重新開啟", { from: previousStatus, to: project.status });
     this.projectTab = "active";
     this.save();
     this.renderAll();

@@ -374,6 +374,7 @@ button {
 }
 
 .day-cell {
+  position: relative;
   min-height: 118px;
   padding: 9px;
   background: var(--bg);
@@ -412,6 +413,64 @@ button {
   font-size: 12px;
   text-overflow: ellipsis;
   white-space: nowrap;
+  border: 0;
+}
+
+.event-pill {
+  cursor: pointer;
+}
+
+.more-pill {
+  font-weight: 700;
+}
+
+.calendar-popover {
+  position: absolute;
+  left: 8px;
+  top: 38px;
+  z-index: 20;
+  width: min(260px, 78vw);
+  padding: 12px;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  box-shadow: var(--shadow);
+}
+
+.calendar-popover strong,
+.calendar-popover small {
+  display: block;
+}
+
+.calendar-popover small {
+  margin: 3px 0 8px;
+  color: var(--muted);
+}
+
+.calendar-popover div {
+  display: grid;
+  gap: 6px;
+}
+
+.calendar-popover button {
+  display: grid;
+  grid-template-columns: 10px minmax(0, 1fr);
+  gap: 8px;
+  align-items: center;
+  min-height: 32px;
+  padding: 6px 8px;
+  color: var(--text);
+  text-align: left;
+  background: var(--bg);
+  border: 0;
+  border-radius: 8px;
+}
+
+.calendar-popover button span {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
 }
 
 .status-In-Progress { background: var(--primary); }
@@ -982,6 +1041,18 @@ textarea:focus {
 .compact-row.done span {
   color: var(--muted);
   text-decoration: line-through;
+}
+
+.compact-row[draggable="true"] {
+  cursor: grab;
+}
+
+.drag-handle {
+  display: inline-grid;
+  width: 28px;
+  height: 28px;
+  place-items: center;
+  color: var(--muted);
 }
 
 .compact-row time {
