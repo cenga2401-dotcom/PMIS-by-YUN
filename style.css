@@ -984,6 +984,10 @@ textarea:focus {
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
 }
 
+.finance-edit-form {
+  grid-template-columns: repeat(3, minmax(0, 1fr)) auto;
+}
+
 .full-info-grid {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -1293,6 +1297,13 @@ textarea:focus {
   margin-top: 18px;
 }
 
+.modal-note {
+  margin: 14px 0 0;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
 label {
   display: grid;
   gap: 6px;
@@ -1350,6 +1361,10 @@ label {
   .full-edit-form {
     grid-template-columns: 1fr 1fr;
   }
+
+  .finance-edit-form {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }
 
 @media (max-width: 760px) {
@@ -1405,6 +1420,7 @@ label {
   .filter-bar,
   .status-manager-item,
   .full-edit-form,
+  .finance-edit-form,
   .compact-attachment-form,
   .full-info-grid {
     grid-template-columns: 1fr;

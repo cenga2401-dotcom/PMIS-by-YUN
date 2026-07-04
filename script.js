@@ -2,6 +2,7 @@ class ESGStorage {
   /** Creates a LocalStorage wrapper with a fixed storage key. */
   constructor(key) {
     this.key = key;
+    this.configKey = `${key}.supabaseConfig`;
   }
 
   /** Reads persisted application data from LocalStorage. */
@@ -14,12 +15,172 @@ class ESGStorage {
   save(data) {
     localStorage.setItem(this.key, JSON.stringify(data));
   }
+
+  /** Reads Supabase connection settings from LocalStorage or window config. */
+  loadConfig() {
+    const saved = localStorage.getItem(this.configKey);
+    const local = saved ? JSON.parse(saved) : {};
+    const global = window.PMIS_SUPABASE_CONFIG || {};
+    return {
+      url: (local.url || global.url || "").trim(),
+      anonKey: (local.anonKey || global.anonKey || "").trim()
+    };
+  }
+
+  /** Saves Supabase connection settings locally. */
+  saveConfig(config) {
+    localStorage.setItem(this.configKey, JSON.stringify(config));
+  }
+
+  /** Clears Supabase connection settings. */
+  clearConfig() {
+    localStorage.removeItem(this.configKey);
+  }
+}
+
+class SupabasePMISStore {
+  /** Creates a small Supabase REST client without external packages. */
+  constructor(config) {
+    this.url = config.url.replace(/\/$/, "");
+    this.anonKey = config.anonKey;
+    this.tables = ["projects", "tasks", "milestones", "notes", "attachments", "activityLogs"];
+  }
+
+  /** Returns whether Supabase is configured enough to use. */
+  isConfigured() {
+    return Boolean(this.url && this.anonKey);
+  }
+
+  /** Calls the Supabase REST API. */
+  async request(path, options = {}) {
+    const response = await fetch(`${this.url}/rest/v1/${path}`, {
+      ...options,
+      headers: {
+        apikey: this.anonKey,
+        Authorization: `Bearer ${this.anonKey}`,
+        "Content-Type": "application/json",
+        Prefer: "return=representation",
+        ...(options.headers || {})
+      }
+    });
+    if (!response.ok) {
+      const message = await response.text();
+      throw new Error(message || `Supabase request failed: ${response.status}`);
+    }
+    if (response.status === 204) return null;
+    const text = await response.text();
+    return text ? JSON.parse(text) : null;
+  }
+
+  /** Loads all PMIS tables and reconstructs the app state. */
+  async loadData(fallbackData) {
+    if (!this.isConfigured()) return fallbackData;
+    const [projectRows, taskRows, milestoneRows, noteRows, attachmentRows, activityRows] = await Promise.all([
+      this.readTable("projects"),
+      this.readTable("tasks"),
+      this.readTable("milestones"),
+      this.readTable("notes"),
+      this.readTable("attachments"),
+      this.readTable("activityLogs")
+    ]);
+    if (!projectRows.length && !taskRows.length) return fallbackData;
+    const projects = projectRows
+      .filter(row => !row.project_id)
+      .map(row => ({ ...row.payload, id: row.id }))
+      .sort((a, b) => String(a.code || "").localeCompare(String(b.code || "")));
+    projects.forEach(project => {
+      project.tasks = taskRows.filter(row => row.project_id === project.id).map(row => ({ ...row.payload, id: row.id }));
+      project.checklist = milestoneRows.filter(row => row.project_id === project.id).map(row => ({ ...row.payload, id: row.id }));
+      project.notes = noteRows.filter(row => row.project_id === project.id).map(row => ({ ...row.payload, id: row.id }));
+      project.attachments = attachmentRows.filter(row => row.project_id === project.id).map(row => ({ ...row.payload, id: row.id }));
+      project.activityLogs = activityRows.filter(row => row.project_id === project.id).map(row => ({ ...row.payload, id: row.id }));
+    });
+    return {
+      ...fallbackData,
+      projects,
+      tasks: taskRows.filter(row => !row.project_id).map(row => ({ ...row.payload, id: row.id }))
+    };
+  }
+
+  /** Reads one Supabase table. */
+  async readTable(table) {
+    return await this.request(`${table}?select=id,project_id,payload,updated_at`) || [];
+  }
+
+  /** Replaces Supabase PMIS rows with the supplied app state. */
+  async saveData(data) {
+    if (!this.isConfigured()) return;
+    await this.clearAllTables();
+    const rows = this.flattenData(data);
+    for (const table of this.tables) {
+      if (rows[table].length) await this.upsertRows(table, rows[table]);
+    }
+  }
+
+  /** Imports existing LocalStorage data into Supabase. */
+  async migrateFromLocalStorage(data) {
+    await this.saveData(data);
+  }
+
+  /** Deletes all app rows from PMIS tables. */
+  async clearAllTables() {
+    for (const table of [...this.tables].reverse()) {
+      await this.request(`${table}?id=neq.__pmis_never__`, { method: "DELETE" });
+    }
+  }
+
+  /** Upserts rows into a Supabase table. */
+  async upsertRows(table, rows) {
+    await this.request(`${table}?on_conflict=id`, {
+      method: "POST",
+      headers: { Prefer: "resolution=merge-duplicates,return=minimal" },
+      body: JSON.stringify(rows)
+    });
+  }
+
+  /** Converts current nested app data into Supabase table rows. */
+  flattenData(data) {
+    const now = new Date().toISOString();
+    const rows = {
+      projects: [],
+      tasks: [],
+      milestones: [],
+      notes: [],
+      attachments: [],
+      activityLogs: []
+    };
+    data.projects.forEach(project => {
+      const { tasks = [], checklist = [], notes = [], attachments = [], activityLogs = [], ...projectPayload } = project;
+      rows.projects.push(this.row(project.id, null, projectPayload, now));
+      tasks.forEach(task => rows.tasks.push(this.row(task.id, project.id, task, now)));
+      checklist.forEach(milestone => rows.milestones.push(this.row(milestone.id, project.id, milestone, now)));
+      notes.forEach(note => rows.notes.push(this.row(note.id, project.id, note, now)));
+      attachments.forEach(file => rows.attachments.push(this.row(file.id, project.id, file, now)));
+      activityLogs.forEach(log => rows.activityLogs.push(this.row(log.id, project.id, log, now)));
+    });
+    data.tasks.forEach(task => rows.tasks.push(this.row(task.id, null, task, now)));
+    return rows;
+  }
+
+  /** Creates one normalized Supabase row. */
+  row(id, projectId, payload, updatedAt) {
+    return {
+      id,
+      project_id: projectId,
+      payload,
+      updated_at: updatedAt
+    };
+  }
 }
 
 class ESGApp {
   /** Creates the main application controller and initializes state defaults. */
   constructor() {
     this.storage = new ESGStorage("esgIsoConsultingApp.v1");
+    this.supabaseConfig = this.storage.loadConfig();
+    this.supabaseStore = new SupabasePMISStore(this.supabaseConfig);
+    this.supabaseEnabled = this.supabaseStore.isConfigured();
+    this.syncingToSupabase = false;
     this.projectTypes = ["ISO14064", "ISO14067", "ISO50001", "ISO14001", "CBAM", "PCR", "碳標籤", "ESG", "政府補助", "其他"];
     this.defaultStatuses = [
       { id: "待報價", name: "待報價", color: "#64748b", locked: false },
@@ -61,8 +222,9 @@ class ESGApp {
     this.cacheDom();
     this.populateSelects();
     this.bindEvents();
-    this.save(false);
+    this.storage.save(this.state);
     this.renderAll();
+    this.loadFromSupabaseIfConfigured().finally(() => this.importFinanceRowsFromExcel());
     setTimeout(() => this.dom.loading.classList.add("hidden"), 350);
   }
 
@@ -73,6 +235,13 @@ class ESGApp {
       appShell: document.querySelector(".app-shell"),
       sidebar: document.querySelector(".sidebar"),
       main: document.querySelector(".main"),
+      databaseSettingsBtn: document.getElementById("databaseSettingsBtn"),
+      databaseModal: document.getElementById("databaseModal"),
+      databaseForm: document.getElementById("databaseForm"),
+      supabaseUrlInput: document.getElementById("supabaseUrlInput"),
+      supabaseAnonKeyInput: document.getElementById("supabaseAnonKeyInput"),
+      clearDatabaseSettingsBtn: document.getElementById("clearDatabaseSettingsBtn"),
+      migrateToSupabaseBtn: document.getElementById("migrateToSupabaseBtn"),
       navLinks: document.querySelectorAll(".nav-link"),
       views: document.querySelectorAll(".view"),
       pageTitle: document.getElementById("pageTitle"),
@@ -146,6 +315,13 @@ class ESGApp {
       project.status = project.status || "In Progress";
       project.progress = Number.isFinite(project.progress) ? project.progress : 0;
       project.completedDate = project.completedDate || "";
+      project.totalAmount = this.toNumber(project.totalAmount);
+      project.receivedAmount = this.toNumber(project.receivedAmount);
+      project.unreceivedAmount = project.unreceivedAmount === undefined || project.unreceivedAmount === null
+        ? Math.max(project.totalAmount - project.receivedAmount, 0)
+        : this.toNumber(project.unreceivedAmount);
+      project.paymentProgress = project.paymentProgress || "";
+      project.contractPeriod = project.contractPeriod || "";
       project.checklist = Array.isArray(project.checklist) ? project.checklist : [];
       project.tasks = Array.isArray(project.tasks) ? project.tasks : [];
       project.activities = Array.isArray(project.activities) ? project.activities : [];
@@ -233,6 +409,11 @@ class ESGApp {
   bindEvents() {
     this.dom.navLinks.forEach(button => button.addEventListener("click", () => this.switchView(button.dataset.view)));
     document.getElementById("menuToggle").addEventListener("click", () => this.dom.sidebar.classList.toggle("open"));
+    this.dom.databaseSettingsBtn.addEventListener("click", () => this.openDatabaseSettings());
+    document.querySelectorAll("[data-close-database-modal]").forEach(button => button.addEventListener("click", () => this.dom.databaseModal.close()));
+    this.dom.databaseForm.addEventListener("submit", event => this.saveDatabaseSettings(event));
+    this.dom.clearDatabaseSettingsBtn.addEventListener("click", () => this.clearDatabaseSettings());
+    this.dom.migrateToSupabaseBtn.addEventListener("click", () => this.migrateLocalDataToSupabase());
     document.getElementById("themeToggle").addEventListener("click", () => this.toggleTheme());
     document.getElementById("newProjectBtn").addEventListener("click", () => this.openProjectModal());
     document.querySelectorAll("[data-close-modal]").forEach(button => button.addEventListener("click", () => this.dom.projectModal.close()));
@@ -310,6 +491,11 @@ class ESGApp {
       status,
       progress,
       completedDate: status === "Completed" ? dueDate : "",
+      totalAmount: 0,
+      receivedAmount: 0,
+      unreceivedAmount: 0,
+      paymentProgress: "",
+      contractPeriod: "",
       checklist: template.map((title, index) => ({ id: this.uid(), title, done: index < doneCount })),
       tasks: [
         { id: this.uid(), title: "修改報告", done: false },
@@ -330,7 +516,179 @@ class ESGApp {
   /** Persists the current state and optionally shows an auto-save toast. */
   save(showToast = true) {
     this.storage.save(this.state);
+    this.queueSupabaseSync();
     if (showToast) this.autoSaveToast();
+  }
+
+  /** Loads Supabase data on startup when a connection is configured. */
+  async loadFromSupabaseIfConfigured() {
+    if (!this.supabaseEnabled) return;
+    try {
+      const remote = await this.supabaseStore.loadData(this.state);
+      this.state = this.migrate(remote);
+      this.storage.save(this.state);
+      this.renderAll();
+      this.toast("已從 Supabase 載入資料");
+    } catch (error) {
+      console.warn(error);
+      this.toast("Supabase 載入失敗，已使用 LocalStorage");
+    }
+  }
+
+  /** Imports Excel-generated finance rows once and merges them by project code. */
+  importFinanceRowsFromExcel() {
+    const rows = window.PMIS_FINANCE_IMPORT;
+    if (!Array.isArray(rows) || !rows.length) return;
+    const version = window.PMIS_FINANCE_IMPORT_VERSION || `finance-${rows.length}`;
+    const flagKey = `${this.storage.key}.financeImport.${version}`;
+    if (localStorage.getItem(flagKey)) return;
+    let created = 0;
+    let updated = 0;
+    rows.forEach(row => {
+      const code = String(row.code || "").trim();
+      if (!code) return;
+      const project = this.state.projects.find(item => String(item.code || "").trim().toLowerCase() === code.toLowerCase());
+      if (project) {
+        this.mergeFinanceRowIntoProject(project, row);
+        this.addActivityLog(project, "project_updated", "匯入財務資料", "由 Excel 匯入專案總額、已收金額、未收金額", { source: "excel_finance_import" });
+        updated += 1;
+        return;
+      }
+      const importedProject = this.createProjectFromFinanceRow(row);
+      this.addActivityLog(importedProject, "project_created", "建立案件", `由 Excel 匯入案件：「${importedProject.name}」`, { source: "excel_finance_import" });
+      this.state.projects.push(importedProject);
+      created += 1;
+    });
+    localStorage.setItem(flagKey, "1");
+    if (created || updated) {
+      this.state = this.migrate(this.state);
+      this.save(false);
+      this.renderAll();
+      this.toast(`已匯入 Excel 金額資料：新增 ${created} 筆，更新 ${updated} 筆`);
+    }
+  }
+
+  /** Applies one imported finance row to an existing project without deleting user edits. */
+  mergeFinanceRowIntoProject(project, row) {
+    project.totalAmount = this.toNumber(row.totalAmount);
+    project.receivedAmount = this.toNumber(row.receivedAmount);
+    project.unreceivedAmount = this.toNumber(row.unreceivedAmount);
+    project.paymentProgress = row.paymentProgress || project.paymentProgress || "";
+    project.contractPeriod = row.contractPeriod || project.contractPeriod || "";
+    if (!project.client && row.client) project.client = row.client;
+    if (!project.name && row.name) project.name = row.name;
+    if (!project.type && row.type) project.type = row.type;
+    if (!project.owner && row.owner) project.owner = row.owner;
+    if (!project.startDate && row.startDate) project.startDate = row.startDate;
+    if (!project.dueDate && row.dueDate) project.dueDate = row.dueDate;
+  }
+
+  /** Creates a LocalStorage-compatible project from one imported finance row. */
+  createProjectFromFinanceRow(row) {
+    return {
+      id: this.uid(),
+      code: String(row.code || "").trim(),
+      client: row.client || "",
+      name: row.name || row.code || "未命名案件",
+      type: row.type || "其他",
+      contact: "",
+      phone: "",
+      email: "",
+      owner: row.owner || "",
+      startDate: row.startDate || this.today(),
+      dueDate: row.dueDate || row.startDate || this.today(),
+      status: "In Progress",
+      progress: 0,
+      completedDate: "",
+      totalAmount: this.toNumber(row.totalAmount),
+      receivedAmount: this.toNumber(row.receivedAmount),
+      unreceivedAmount: this.toNumber(row.unreceivedAmount),
+      paymentProgress: row.paymentProgress || "",
+      contractPeriod: row.contractPeriod || "",
+      checklist: this.milestoneTemplate.map(title => ({ id: this.uid(), title, done: false })),
+      tasks: [],
+      activityLogs: [],
+      notes: row.note ? [{ id: this.uid(), date: this.today(), time: new Date().toTimeString().slice(0, 5), text: row.note }] : [],
+      attachments: [],
+      timeline: [{ id: this.uid(), title: "建立案件", date: row.startDate || this.today(), done: true }]
+    };
+  }
+
+  /** Debounces full-state Supabase synchronization. */
+  queueSupabaseSync() {
+    if (!this.supabaseEnabled || this.syncingToSupabase) return;
+    clearTimeout(this.supabaseSyncTimer);
+    this.supabaseSyncTimer = setTimeout(() => this.syncToSupabase(), 500);
+  }
+
+  /** Writes the current state into Supabase. */
+  async syncToSupabase() {
+    if (!this.supabaseEnabled) return;
+    try {
+      this.syncingToSupabase = true;
+      await this.supabaseStore.saveData(this.state);
+    } catch (error) {
+      console.warn(error);
+      this.toast("Supabase 同步失敗，資料已保留在 LocalStorage");
+    } finally {
+      this.syncingToSupabase = false;
+    }
+  }
+
+  /** Opens the Supabase settings dialog. */
+  openDatabaseSettings() {
+    this.supabaseConfig = this.storage.loadConfig();
+    this.dom.supabaseUrlInput.value = this.supabaseConfig.url;
+    this.dom.supabaseAnonKeyInput.value = this.supabaseConfig.anonKey;
+    this.dom.databaseModal.showModal();
+  }
+
+  /** Saves Supabase settings and reloads remote data. */
+  async saveDatabaseSettings(event) {
+    event.preventDefault();
+    const data = Object.fromEntries(new FormData(this.dom.databaseForm).entries());
+    this.supabaseConfig = { url: data.url.trim(), anonKey: data.anonKey.trim() };
+    this.storage.saveConfig(this.supabaseConfig);
+    this.supabaseStore = new SupabasePMISStore(this.supabaseConfig);
+    this.supabaseEnabled = this.supabaseStore.isConfigured();
+    this.dom.databaseModal.close();
+    this.toast(this.supabaseEnabled ? "Supabase 設定已儲存" : "已使用 LocalStorage 模式");
+    await this.loadFromSupabaseIfConfigured();
+  }
+
+  /** Clears Supabase settings and keeps LocalStorage fallback. */
+  clearDatabaseSettings() {
+    this.storage.clearConfig();
+    this.supabaseConfig = { url: "", anonKey: "" };
+    this.supabaseStore = new SupabasePMISStore(this.supabaseConfig);
+    this.supabaseEnabled = false;
+    this.dom.supabaseUrlInput.value = "";
+    this.dom.supabaseAnonKeyInput.value = "";
+    this.toast("已切回 LocalStorage 單機模式");
+  }
+
+  /** Imports current LocalStorage-compatible state into Supabase. */
+  async migrateLocalDataToSupabase() {
+    const config = {
+      url: this.dom.supabaseUrlInput.value.trim(),
+      anonKey: this.dom.supabaseAnonKeyInput.value.trim()
+    };
+    const store = new SupabasePMISStore(config);
+    if (!store.isConfigured()) {
+      this.toast("請先填入 Supabase URL 與 Anon Key");
+      return;
+    }
+    try {
+      await store.migrateFromLocalStorage(this.state);
+      this.storage.saveConfig(config);
+      this.supabaseConfig = config;
+      this.supabaseStore = store;
+      this.supabaseEnabled = true;
+      this.toast("LocalStorage 資料已匯入 Supabase");
+    } catch (error) {
+      console.warn(error);
+      this.toast("匯入 Supabase 失敗，請確認資料表與權限");
+    }
   }
 
   /** Generates a compact unique id. */
@@ -358,6 +716,17 @@ class ESGApp {
   /** Escapes user text before inserting it into HTML. */
   escape(text) {
     return String(text || "").replace(/[&<>"']/g, char => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#039;" }[char]));
+  }
+
+  /** Converts imported or edited amount values into safe numbers. */
+  toNumber(value) {
+    const number = Number(String(value ?? 0).replaceAll(",", ""));
+    return Number.isFinite(number) ? number : 0;
+  }
+
+  /** Formats a project amount for dashboard/detail display. */
+  formatCurrency(value) {
+    return `NT$ ${this.toNumber(value).toLocaleString("zh-TW", { maximumFractionDigits: 0 })}`;
   }
 
   /** Renders all major sections after data changes. */
@@ -965,6 +1334,11 @@ class ESGApp {
       status: "In Progress",
       progress: 0,
       completedDate: "",
+      totalAmount: 0,
+      receivedAmount: 0,
+      unreceivedAmount: 0,
+      paymentProgress: "",
+      contractPeriod: "",
       checklist: this.milestoneTemplate.map(title => ({ id: this.uid(), title, done: false })),
       tasks: [],
       activityLogs: [],
@@ -1233,7 +1607,10 @@ class ESGApp {
       ["負責顧問", project.owner],
       ["開始日", this.formatDate(project.startDate)],
       ["截止日", this.formatDate(project.dueDate)],
-      ["完成日", this.formatDate(project.completedDate)]
+      ["完成日", this.formatDate(project.completedDate)],
+      ["專案總額", this.formatCurrency(project.totalAmount)],
+      ["已收金額", this.formatCurrency(project.receivedAmount)],
+      ["未收金額", this.formatCurrency(project.unreceivedAmount)]
     ];
     return `
       <section class="full-card">
@@ -1242,6 +1619,12 @@ class ESGApp {
           <label>案件編號<input name="code" value="${this.escape(project.code)}" required></label>
           <label>目前狀態<select name="status">${statusOptions}</select></label>
           <button class="primary-button">更新</button>
+        </form>
+        <form class="detail-edit-form finance-edit-form" data-update-project-finance>
+          <label>專案總額<input name="totalAmount" type="number" min="0" step="1" value="${this.toNumber(project.totalAmount)}"></label>
+          <label>已收金額<input name="receivedAmount" type="number" min="0" step="1" value="${this.toNumber(project.receivedAmount)}"></label>
+          <label>未收金額<input name="unreceivedAmount" type="number" min="0" step="1" value="${this.toNumber(project.unreceivedAmount)}"></label>
+          <button class="primary-button">更新金額</button>
         </form>
         <div class="full-info-grid">${fields.map(([label, value]) => `<div><small>${label}</small><strong>${this.escape(value)}</strong></div>`).join("")}</div>
       </section>`;
@@ -1320,11 +1703,13 @@ class ESGApp {
     const container = this.dom.fullProjectContent;
     document.getElementById("backToProjectsBtn").addEventListener("click", () => this.switchView("projects"));
     const metaForm = container.querySelector("[data-update-project-meta]");
+    const financeForm = container.querySelector("[data-update-project-finance]");
     const checklistForm = container.querySelector("[data-add-checklist]");
     const projectTaskForm = container.querySelector("[data-add-project-task]");
     const noteForm = container.querySelector("[data-add-note]");
     const attachmentForm = container.querySelector("[data-add-attachment]");
     if (metaForm) metaForm.addEventListener("submit", event => this.updateProjectMeta(event, project));
+    if (financeForm) financeForm.addEventListener("submit", event => this.updateProjectFinance(event, project));
     if (checklistForm) checklistForm.addEventListener("submit", event => this.addChecklistItem(event, project));
     if (projectTaskForm) projectTaskForm.addEventListener("submit", event => this.addProjectTask(event, project));
     if (noteForm) noteForm.addEventListener("submit", event => this.addNote(event, project));
@@ -1555,6 +1940,31 @@ class ESGApp {
     }
     if (project.status !== "Completed") project.completedDate = "";
     if (project.status === "Completed" && !project.completedDate) project.completedDate = this.today();
+    this.save();
+    this.renderAll();
+  }
+
+  /** Updates project finance fields from the full project detail page. */
+  updateProjectFinance(event, project) {
+    event.preventDefault();
+    const data = Object.fromEntries(new FormData(event.target).entries());
+    const previous = {
+      totalAmount: this.toNumber(project.totalAmount),
+      receivedAmount: this.toNumber(project.receivedAmount),
+      unreceivedAmount: this.toNumber(project.unreceivedAmount)
+    };
+    project.totalAmount = this.toNumber(data.totalAmount);
+    project.receivedAmount = this.toNumber(data.receivedAmount);
+    project.unreceivedAmount = this.toNumber(data.unreceivedAmount);
+    const changes = [
+      ["專案總額", previous.totalAmount, project.totalAmount],
+      ["已收金額", previous.receivedAmount, project.receivedAmount],
+      ["未收金額", previous.unreceivedAmount, project.unreceivedAmount]
+    ].filter(([, from, to]) => from !== to);
+    if (changes.length) {
+      const description = changes.map(([label, from, to]) => `${label}：${this.formatCurrency(from)} → ${this.formatCurrency(to)}`).join("；");
+      this.addActivityLog(project, "project_updated", "修改案件資料", description, { fields: changes.map(([label]) => label) });
+    }
     this.save();
     this.renderAll();
   }

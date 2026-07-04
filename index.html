@@ -37,6 +37,7 @@
           <p id="pageSubtitle">ESG / ISO 顧問案件管理總覽</p>
         </div>
         <div class="topbar-actions">
+          <button id="databaseSettingsBtn" class="ghost-button" title="Supabase 設定">Database</button>
           <button id="themeToggle" class="icon-button" title="切換深色模式">◐</button>
           <button id="newProjectBtn" class="primary-button">New Project</button>
         </div>
@@ -235,7 +236,33 @@
     </footer>
   </dialog>
 
+  <dialog id="databaseModal" class="modal">
+    <form id="databaseForm" method="dialog">
+      <div class="modal-header">
+        <h2>Supabase Database</h2>
+        <button class="icon-button" type="button" data-close-database-modal>×</button>
+      </div>
+      <div class="form-grid">
+        <label>Supabase URL<input name="url" id="supabaseUrlInput" placeholder="https://xxxx.supabase.co"></label>
+        <label>Anon Key<input name="anonKey" id="supabaseAnonKeyInput" placeholder="eyJ..."></label>
+      </div>
+      <p class="modal-note">未設定時會使用 LocalStorage 單機模式。設定後，頁面會從 Supabase 讀取並同步資料。</p>
+      <footer class="modal-actions">
+        <button type="button" class="ghost-button" id="clearDatabaseSettingsBtn">清除設定</button>
+        <button type="button" class="ghost-button" id="migrateToSupabaseBtn">匯入 LocalStorage</button>
+        <button type="submit" class="primary-button">儲存設定</button>
+      </footer>
+    </form>
+  </dialog>
+
   <div id="toastHost" class="toast-host"></div>
+  <script>
+    window.PMIS_SUPABASE_CONFIG = window.PMIS_SUPABASE_CONFIG || {
+      url: "",
+      anonKey: ""
+    };
+  </script>
+  <script src="finance-import.js"></script>
   <script src="script.js"></script>
 </body>
 </html>
