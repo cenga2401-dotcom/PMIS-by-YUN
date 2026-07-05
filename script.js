@@ -301,6 +301,7 @@ class ESGApp {
     this.detailCollapsed = false;
     this.detailPinned = false;
     this.sort = { key: "dueDate", direction: "asc" };
+    this.dueGanttFilters = { range: "90", status: "all", owner: "all" };
     this.quickFilter = null;
     this.confirmResolver = null;
     this.saveToastTimer = null;
@@ -341,6 +342,7 @@ class ESGApp {
       pageTitle: document.getElementById("pageTitle"),
       pageSubtitle: document.getElementById("pageSubtitle"),
       metricGrid: document.getElementById("metricGrid"),
+      dueGanttPanel: document.getElementById("dueGanttPanel"),
       dashboardSearch: document.getElementById("dashboardSearch"),
       dashboardSearchResults: document.getElementById("dashboardSearchResults"),
       calendarLayout: document.querySelector(".calendar-layout"),
@@ -1026,7 +1028,7 @@ class ESGApp {
     ];
   }
 
-  /** Draws dashboard metric cards, search results, and charts. */
+  /** Draws dashboard metric cards, search results, and the due-project Gantt chart. */
   renderDashboard() {
     this.dom.metricGrid.innerHTML = this.getMetrics().map(metric => `
       <button class="metric-card" data-metric-action="${metric.action}">
@@ -1039,8 +1041,187 @@ class ESGApp {
       card.addEventListener("click", () => this.handleMetricClick(card.dataset.metricAction));
     });
     this.renderDashboardSearch();
-    this.drawDonutChart("statusChart", this.countBy("status"), this.state.statuses.map(status => status.color));
-    this.drawMonthlyChart("monthlyChart");
+    this.renderDueGanttChart();
+  }
+
+  /** Renders the dashboard filters for the due-project Gantt chart. */
+  renderDueGanttFilters() {
+    const owners = [...new Set(this.state.projects.map(project => project.owner).filter(Boolean))].sort();
+    const statusIds = [...new Set([
+      ...this.state.statuses.filter(status => status.id !== "Completed").map(status => status.id),
+      ...this.state.projects.filter(project => project.status !== "Completed").map(project => project.status)
+    ].filter(Boolean))];
+    const rangeOptions = [
+      ["30", "未來 30 天"],
+      ["60", "未來 60 天"],
+      ["90", "未來 90 天"],
+      ["180", "未來 180 天"],
+      ["all", "全部"]
+    ];
+    return `
+      <div class="due-gantt-filters">
+        <label>時間範圍<select id="dueGanttRange">${rangeOptions.map(([value, label]) => `<option value="${value}" ${this.dueGanttFilters.range === value ? "selected" : ""}>${label}</option>`).join("")}</select></label>
+        <label>專案狀態<select id="dueGanttStatus">
+          <option value="all" ${this.dueGanttFilters.status === "all" ? "selected" : ""}>全部未結案</option>
+          ${statusIds.map(id => `<option value="${this.escape(id)}" ${this.dueGanttFilters.status === id ? "selected" : ""}>${this.escape(this.getStatus(id).name)}</option>`).join("")}
+        </select></label>
+        <label>負責人<select id="dueGanttOwner">
+          <option value="all" ${this.dueGanttFilters.owner === "all" ? "selected" : ""}>全部</option>
+          ${owners.map(owner => `<option value="${this.escape(owner)}" ${this.dueGanttFilters.owner === owner ? "selected" : ""}>${this.escape(owner)}</option>`).join("")}
+        </select></label>
+        <div class="due-gantt-actions">
+          <button class="primary-button" id="dueGanttApply">查詢</button>
+          <button class="ghost-button" id="dueGanttReset">重設</button>
+        </div>
+      </div>
+    `;
+  }
+
+  /** Returns filtered and sorted active projects for the due-project Gantt chart. */
+  getDueGanttProjects() {
+    const range = this.dueGanttFilters.range;
+    const maxDays = range === "all" ? Infinity : Number(range);
+    return this.state.projects
+      .filter(project => project.status !== "Completed")
+      .filter(project => Boolean(project.dueDate))
+      .map(project => ({ project, daysUntilDue: this.calculateDaysUntilDue(project.dueDate) }))
+      .filter(item => Number.isFinite(item.daysUntilDue))
+      .filter(item => item.daysUntilDue < 0 || item.daysUntilDue <= maxDays)
+      .filter(item => this.dueGanttFilters.status === "all" || item.project.status === this.dueGanttFilters.status)
+      .filter(item => this.dueGanttFilters.owner === "all" || item.project.owner === this.dueGanttFilters.owner)
+      .sort((a, b) => a.daysUntilDue - b.daysUntilDue || String(a.project.dueDate).localeCompare(String(b.project.dueDate)))
+      .map(item => item.project);
+  }
+
+  /** Renders the dashboard due-project Gantt chart. */
+  renderDueGanttChart() {
+    if (!this.dom.dueGanttPanel) return;
+    const projects = this.getDueGanttProjects();
+    const today = new Date(`${this.today()}T00:00:00`);
+    const rangeDays = this.dueGanttFilters.range === "all" ? 180 : Number(this.dueGanttFilters.range);
+    const fallbackEnd = new Date(today);
+    fallbackEnd.setDate(fallbackEnd.getDate() + rangeDays);
+    const dateValues = projects.flatMap(project => [
+      new Date(`${project.startDate || this.today()}T00:00:00`).getTime(),
+      new Date(`${project.dueDate}T00:00:00`).getTime()
+    ]).filter(Number.isFinite);
+    const minTime = Math.min(today.getTime(), ...dateValues);
+    const maxTime = Math.max(fallbackEnd.getTime(), today.getTime(), ...dateValues);
+    const totalDays = Math.max(1, Math.ceil((maxTime - minTime) / 86400000));
+    const todayLeft = Math.max(0, Math.min(100, (today.getTime() - minTime) / (maxTime - minTime || 1) * 100));
+    const monthTicks = this.buildGanttMonthTicks(minTime, maxTime);
+    this.dom.dueGanttPanel.innerHTML = `
+      <div class="panel-header due-gantt-header">
+        <div>
+          <h2>即將到期專案甘特圖</h2>
+          <p>依截止日排序，逾期專案置頂。</p>
+        </div>
+        <div class="due-gantt-legend">
+          ${[
+            ["#ef4444", "已逾期"],
+            ["#f97316", "30 天內到期"],
+            ["#eab308", "31 - 60 天到期"],
+            ["#22c55e", "61 - 90 天到期"],
+            ["#2563eb", "90 天以上"]
+          ].map(([color, label]) => `<span><i style="background:${color}"></i>${label}</span>`).join("")}
+        </div>
+      </div>
+      ${this.renderDueGanttFilters()}
+      ${projects.length ? `
+        <div class="due-gantt-table">
+          <div class="due-gantt-info-head">專案資訊</div>
+          <div class="due-gantt-timeline">
+            <div class="due-gantt-months">${monthTicks.map(tick => `<span style="left:${tick.left}%">${tick.label}</span>`).join("")}</div>
+            <div class="today-line" style="left:${todayLeft}%"><span>今天</span></div>
+          </div>
+          ${projects.map(project => this.renderDueGanttRow(project, minTime, totalDays)).join("")}
+        </div>
+      ` : `<div class="empty-state">目前沒有即將到期的專案。</div>`}
+    `;
+    this.bindDueGanttEvents();
+  }
+
+  /** Renders one project row in the due-project Gantt chart. */
+  renderDueGanttRow(project, minTime, totalDays) {
+    const start = new Date(`${project.startDate || this.today()}T00:00:00`);
+    const due = new Date(`${project.dueDate}T00:00:00`);
+    const startOffset = Math.max(0, Math.ceil((start.getTime() - minTime) / 86400000));
+    const duration = Math.max(1, Math.ceil((due.getTime() - start.getTime()) / 86400000));
+    const left = Math.max(0, Math.min(100, startOffset / totalDays * 100));
+    const width = Math.max(2, Math.min(100 - left, duration / totalDays * 100));
+    const days = this.calculateDaysUntilDue(project.dueDate);
+    const color = this.getDueStatusColor(days);
+    const rangeText = `${start.getMonth() + 1}月 - ${due.getMonth() + 1}月`;
+    const amount = this.toNumber(project.contractAmount ?? project.totalAmount);
+    const tooltip = `${project.name}\n${project.client}\n開始日期：${this.formatDate(project.startDate || this.today())}\n到期日：${this.formatDate(project.dueDate)}\n${days < 0 ? `已逾期 ${Math.abs(days)} 天` : `剩餘 ${days} 天`}\n狀態：${this.getStatus(project.status).name}`;
+    return `
+      <button class="due-gantt-info" data-gantt-project="${project.id}" title="${this.escape(tooltip)}">
+        <strong>${this.escape(project.code)}</strong>
+        <span>${this.escape(project.name)}</span>
+        <small>${this.escape(project.client)} · ${this.escape(project.owner || "-")}</small>
+        <small>${amount ? this.formatCurrency(amount) : "-"} ${this.statusBadge(project.status)}</small>
+      </button>
+      <button class="due-gantt-row" data-gantt-project="${project.id}" title="${this.escape(tooltip)}">
+        <span class="due-gantt-bar" style="left:${left}%;width:${width}%;background:${color}">
+          <b>${this.escape(rangeText)}</b>
+        </span>
+      </button>
+    `;
+  }
+
+  /** Attaches interactions for dashboard Gantt filters and project rows. */
+  bindDueGanttEvents() {
+    const apply = document.getElementById("dueGanttApply");
+    const reset = document.getElementById("dueGanttReset");
+    if (apply) apply.addEventListener("click", () => {
+      this.dueGanttFilters = {
+        range: document.getElementById("dueGanttRange").value,
+        status: document.getElementById("dueGanttStatus").value,
+        owner: document.getElementById("dueGanttOwner").value
+      };
+      this.renderDueGanttChart();
+    });
+    if (reset) reset.addEventListener("click", () => {
+      this.dueGanttFilters = { range: "90", status: "all", owner: "all" };
+      this.renderDueGanttChart();
+    });
+    this.dom.dueGanttPanel.querySelectorAll("[data-gantt-project]").forEach(row => {
+      row.addEventListener("click", () => this.openFullProjectDetail(row.dataset.ganttProject));
+    });
+  }
+
+  /** Returns a color for a project based on days left until due. */
+  getDueStatusColor(daysUntilDue) {
+    if (daysUntilDue < 0) return "#ef4444";
+    if (daysUntilDue <= 30) return "#f97316";
+    if (daysUntilDue <= 60) return "#eab308";
+    if (daysUntilDue <= 90) return "#22c55e";
+    return "#2563eb";
+  }
+
+  /** Calculates the number of days from today to a due date. */
+  calculateDaysUntilDue(dateText) {
+    if (!dateText) return Infinity;
+    return this.daysUntil(dateText);
+  }
+
+  /** Builds month labels for the Gantt timeline header. */
+  buildGanttMonthTicks(minTime, maxTime) {
+    const ticks = [];
+    const total = maxTime - minTime || 1;
+    const cursor = new Date(minTime);
+    cursor.setDate(1);
+    cursor.setHours(0, 0, 0, 0);
+    while (cursor.getTime() <= maxTime) {
+      if (cursor.getTime() >= minTime) {
+        ticks.push({
+          label: `${cursor.getMonth() + 1}月`,
+          left: Math.max(0, Math.min(100, (cursor.getTime() - minTime) / total * 100))
+        });
+      }
+      cursor.setMonth(cursor.getMonth() + 1);
+    }
+    return ticks;
   }
 
   /** Handles dashboard card navigation and filters. */

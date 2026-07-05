@@ -290,6 +290,227 @@ button {
   grid-column: 1 / -1;
 }
 
+.due-gantt-panel {
+  overflow: hidden;
+}
+
+.due-gantt-header {
+  align-items: flex-start;
+}
+
+.due-gantt-header p {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.due-gantt-legend {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px 12px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.due-gantt-legend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.due-gantt-legend i {
+  width: 10px;
+  height: 10px;
+  border-radius: 999px;
+}
+
+.due-gantt-filters {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr)) auto;
+  gap: 10px;
+  align-items: end;
+  margin-bottom: 14px;
+  padding: 12px;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+}
+
+.due-gantt-filters label {
+  display: grid;
+  gap: 5px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.due-gantt-filters select {
+  min-height: 36px;
+  padding: 0 10px;
+}
+
+.due-gantt-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.due-gantt-table {
+  display: grid;
+  grid-template-columns: 320px minmax(760px, 1fr);
+  overflow-x: auto;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface);
+}
+
+.due-gantt-info-head,
+.due-gantt-timeline {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  min-height: 42px;
+  background: var(--surface-soft);
+  border-bottom: 1px solid var(--line);
+}
+
+.due-gantt-info-head {
+  left: 0;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  padding: 0 12px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.due-gantt-timeline {
+  position: relative;
+  min-width: 760px;
+}
+
+.due-gantt-months {
+  position: relative;
+  height: 42px;
+}
+
+.due-gantt-months span {
+  position: absolute;
+  top: 12px;
+  transform: translateX(-50%);
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.today-line {
+  position: absolute;
+  top: 0;
+  bottom: -9999px;
+  width: 0;
+  border-left: 2px dashed #ef4444;
+  pointer-events: none;
+  z-index: 4;
+}
+
+.today-line span {
+  position: absolute;
+  top: 26px;
+  left: 6px;
+  padding: 2px 5px;
+  color: #ef4444;
+  background: var(--surface);
+  border: 1px solid rgba(239, 68, 68, 0.25);
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.due-gantt-info,
+.due-gantt-row {
+  min-height: 68px;
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  background: transparent;
+  text-align: left;
+  transition: background 0.18s ease;
+}
+
+.due-gantt-info {
+  position: sticky;
+  left: 0;
+  z-index: 1;
+  display: grid;
+  gap: 3px;
+  padding: 9px 12px;
+  color: var(--text);
+  background: var(--surface);
+}
+
+.due-gantt-info strong {
+  font-size: 13px;
+}
+
+.due-gantt-info span {
+  overflow: hidden;
+  font-size: 13px;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.due-gantt-info small {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.due-gantt-row {
+  position: relative;
+  min-width: 760px;
+  background-image: linear-gradient(to right, var(--line) 1px, transparent 1px);
+  background-size: 92px 100%;
+}
+
+.due-gantt-info:hover,
+.due-gantt-row:hover {
+  background-color: var(--surface-soft);
+}
+
+.due-gantt-bar {
+  position: absolute;
+  top: 50%;
+  height: 26px;
+  min-width: 34px;
+  transform: translateY(-50%);
+  border-radius: 999px;
+  box-shadow: 0 8px 18px rgba(15, 23, 42, 0.16);
+}
+
+.due-gantt-bar b {
+  display: block;
+  overflow: hidden;
+  padding: 6px 10px;
+  color: #fff;
+  font-size: 12px;
+  line-height: 14px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.empty-state {
+  padding: 30px;
+  color: var(--muted);
+  text-align: center;
+  background: var(--bg);
+  border: 1px dashed var(--line);
+  border-radius: 12px;
+}
+
 .calendar-layout {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 320px;
@@ -1438,8 +1659,61 @@ label {
 
   .metric-grid,
   .info-grid,
-  .form-grid {
+  .form-grid,
+  .due-gantt-filters {
     grid-template-columns: 1fr;
+  }
+
+  .due-gantt-header {
+    display: grid;
+  }
+
+  .due-gantt-legend {
+    justify-content: flex-start;
+  }
+
+  .due-gantt-actions {
+    width: 100%;
+  }
+
+  .due-gantt-actions button {
+    flex: 1;
+  }
+
+  .due-gantt-table {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 10px;
+    overflow-x: visible;
+    padding: 10px;
+    border: 0;
+    background: transparent;
+  }
+
+  .due-gantt-info-head,
+  .due-gantt-timeline {
+    display: none;
+  }
+
+  .due-gantt-info,
+  .due-gantt-row {
+    position: relative;
+    left: auto;
+    min-height: auto;
+    border: 1px solid var(--line);
+  }
+
+  .due-gantt-info {
+    border-radius: 12px 12px 0 0;
+  }
+
+  .due-gantt-row {
+    min-width: 0;
+    height: 44px;
+    margin-top: -10px;
+    border-top: 0;
+    border-radius: 0 0 12px 12px;
+    background-size: 72px 100%;
   }
 
   .calendar-grid {
