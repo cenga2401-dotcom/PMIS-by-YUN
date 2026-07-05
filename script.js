@@ -44,6 +44,9 @@ class SupabasePMISStore {
     this.url = config.url.replace(/\/$/, "");
     this.anonKey = config.anonKey;
     this.tables = ["projects", "tasks", "milestones", "notes", "attachments", "activityLogs"];
+    this.knownRowIds = this.emptyTableSets();
+    this.knownPayloads = this.emptyTableMaps();
+    this.remoteLoaded = false;
   }
 
   /** Returns whether Supabase is configured enough to use. */
@@ -83,7 +86,19 @@ class SupabasePMISStore {
       this.readTable("attachments"),
       this.readTable("activityLogs")
     ]);
-    if (!projectRows.length && !taskRows.length) return fallbackData;
+    const rowsByTable = {
+      projects: projectRows,
+      tasks: taskRows,
+      milestones: milestoneRows,
+      notes: noteRows,
+      attachments: attachmentRows,
+      activityLogs: activityRows
+    };
+    this.rememberRemoteRows(rowsByTable);
+    this.remoteLoaded = true;
+    if (!this.hasAnyRows(rowsByTable)) {
+      return { ...fallbackData, projects: [], tasks: [] };
+    }
     const projects = projectRows
       .filter(row => !row.project_id)
       .map(row => ({ ...row.payload, id: row.id }))
@@ -107,19 +122,40 @@ class SupabasePMISStore {
     return await this.request(`${table}?select=id,project_id,payload,updated_at`) || [];
   }
 
-  /** Replaces Supabase PMIS rows with the supplied app state. */
+  /** Upserts changed PMIS rows without clearing unrelated remote data. */
   async saveData(data) {
     if (!this.isConfigured()) return;
-    await this.clearAllTables();
+    if (!this.remoteLoaded) {
+      await this.loadData({ theme: "light", statuses: [], projects: [], tasks: [] });
+    }
     const rows = this.flattenData(data);
     for (const table of this.tables) {
-      if (rows[table].length) await this.upsertRows(table, rows[table]);
+      const changedRows = rows[table].filter(row => this.rowNeedsUpsert(table, row));
+      if (changedRows.length) await this.upsertRows(table, changedRows);
+      changedRows.forEach(row => this.rememberRow(table, row));
+    }
+    for (const table of [...this.tables].reverse()) {
+      const desiredIds = new Set(rows[table].map(row => row.id));
+      const deletedIds = [...this.knownRowIds[table]].filter(id => !desiredIds.has(id));
+      if (deletedIds.length) await this.deleteRows(table, deletedIds);
+      deletedIds.forEach(id => {
+        this.knownRowIds[table].delete(id);
+        this.knownPayloads[table].delete(id);
+      });
     }
   }
 
   /** Imports existing LocalStorage data into Supabase. */
   async migrateFromLocalStorage(data) {
-    await this.saveData(data);
+    await this.clearAllTables();
+    this.knownRowIds = this.emptyTableSets();
+    this.knownPayloads = this.emptyTableMaps();
+    this.remoteLoaded = true;
+    const rows = this.flattenData(data);
+    for (const table of this.tables) {
+      if (rows[table].length) await this.upsertRows(table, rows[table]);
+      rows[table].forEach(row => this.rememberRow(table, row));
+    }
   }
 
   /** Deletes all app rows from PMIS tables. */
@@ -136,6 +172,53 @@ class SupabasePMISStore {
       headers: { Prefer: "resolution=merge-duplicates,return=minimal" },
       body: JSON.stringify(rows)
     });
+  }
+
+  /** Deletes specific Supabase rows by id only when the local user deleted them. */
+  async deleteRows(table, ids) {
+    for (const id of ids) {
+      await this.request(`${table}?id=eq.${encodeURIComponent(id)}`, { method: "DELETE" });
+    }
+  }
+
+  /** Creates an empty set collection keyed by table name. */
+  emptyTableSets() {
+    return Object.fromEntries(this.tables.map(table => [table, new Set()]));
+  }
+
+  /** Creates an empty payload map collection keyed by table name. */
+  emptyTableMaps() {
+    return Object.fromEntries(this.tables.map(table => [table, new Map()]));
+  }
+
+  /** Remembers the latest remote rows so future saves only send real changes. */
+  rememberRemoteRows(rowsByTable) {
+    this.knownRowIds = this.emptyTableSets();
+    this.knownPayloads = this.emptyTableMaps();
+    this.tables.forEach(table => {
+      rowsByTable[table].forEach(row => this.rememberRow(table, row));
+    });
+  }
+
+  /** Remembers one known remote row payload. */
+  rememberRow(table, row) {
+    this.knownRowIds[table].add(row.id);
+    this.knownPayloads[table].set(row.id, this.stablePayload(row.payload));
+  }
+
+  /** Returns true when any Supabase table has data. */
+  hasAnyRows(rowsByTable) {
+    return this.tables.some(table => rowsByTable[table].length > 0);
+  }
+
+  /** Returns whether a row is new or changed compared with the last remote snapshot. */
+  rowNeedsUpsert(table, row) {
+    return this.knownPayloads[table].get(row.id) !== this.stablePayload(row.payload);
+  }
+
+  /** Stringifies payloads consistently for lightweight change detection. */
+  stablePayload(payload) {
+    return JSON.stringify(payload || {});
   }
 
   /** Converts current nested app data into Supabase table rows. */
@@ -177,10 +260,16 @@ class ESGApp {
   /** Creates the main application controller and initializes state defaults. */
   constructor() {
     this.storage = new ESGStorage("esgIsoConsultingApp.v1");
+    const storedData = this.storage.load();
+    this.localMigrationSnapshot = storedData ? JSON.parse(JSON.stringify(storedData)) : null;
     this.supabaseConfig = this.storage.loadConfig();
     this.supabaseStore = new SupabasePMISStore(this.supabaseConfig);
     this.supabaseEnabled = this.supabaseStore.isConfigured();
     this.syncingToSupabase = false;
+    this.syncingFromSupabase = false;
+    this.pendingSupabaseSync = false;
+    this.supabasePollTimer = null;
+    this.syncStatus = this.supabaseEnabled ? "同步中" : "使用本機模式";
     this.projectTypes = ["ISO14064", "ISO14067", "ISO50001", "ISO14001", "CBAM", "PCR", "碳標籤", "ESG", "政府補助", "其他"];
     this.defaultStatuses = [
       { id: "待報價", name: "待報價", color: "#64748b", locked: false },
@@ -197,7 +286,7 @@ class ESGApp {
       ISO50001: ["能源審查", "EnPI", "Baseline", "改善方案", "文件建立", "內部稽核", "管理審查", "驗證", "結案"]
     };
     this.milestoneTemplate = ["客戶立案", "請頭款", "頭款已收", "執行專案", "請尾款", "尾款已收", "結案"];
-    this.state = this.migrate(this.storage.load() || this.createDemoData());
+    this.state = this.migrate(storedData || this.createDemoData());
     this.activeView = "dashboard";
     this.projectTab = "active";
     this.calendarDate = new Date();
@@ -222,10 +311,15 @@ class ESGApp {
     this.cacheDom();
     this.populateSelects();
     this.bindEvents();
-    this.storage.save(this.state);
     this.renderAll();
-    this.loadFromSupabaseIfConfigured().finally(() => this.importFinanceRowsFromExcel());
-    setTimeout(() => this.dom.loading.classList.add("hidden"), 350);
+    const startup = this.supabaseEnabled
+      ? this.syncFromSupabase({ force: true, showToast: true })
+      : Promise.resolve(this.setSyncStatus("使用本機模式", true));
+    startup.finally(() => {
+      this.importFinanceRowsFromExcel();
+      this.startSupabasePolling();
+      setTimeout(() => this.dom.loading.classList.add("hidden"), 350);
+    });
   }
 
   /** Stores frequently used DOM nodes for faster access. */
@@ -516,23 +610,72 @@ class ESGApp {
   /** Persists the current state and optionally shows an auto-save toast. */
   save(showToast = true) {
     this.storage.save(this.state);
+    if (!this.supabaseEnabled) this.localMigrationSnapshot = JSON.parse(JSON.stringify(this.state));
     this.queueSupabaseSync();
     if (showToast) this.autoSaveToast();
   }
 
-  /** Loads Supabase data on startup when a connection is configured. */
+  /** Loads the latest Supabase data and keeps LocalStorage as a cache only. */
   async loadFromSupabaseIfConfigured() {
-    if (!this.supabaseEnabled) return;
+    return this.syncFromSupabase({ force: true, showToast: true });
+  }
+
+  /** Pulls the latest cloud data without overwriting an actively edited form. */
+  async syncFromSupabase(options = {}) {
+    const { force = false, showToast = false } = options;
+    if (!this.supabaseEnabled) {
+      this.setSyncStatus("使用本機模式", showToast);
+      return;
+    }
+    if (this.syncingFromSupabase || this.syncingToSupabase) return;
+    if (!force && this.supabaseSyncTimer) return;
+    if (!force && this.isEditingForm()) return;
     try {
+      this.syncingFromSupabase = true;
+      this.setSyncStatus("同步中", showToast);
       const remote = await this.supabaseStore.loadData(this.state);
       this.state = this.migrate(remote);
       this.storage.save(this.state);
       this.renderAll();
-      this.toast("已從 Supabase 載入資料");
+      this.setSyncStatus("已同步", showToast);
     } catch (error) {
       console.warn(error);
-      this.toast("Supabase 載入失敗，已使用 LocalStorage");
+      this.setSyncStatus("同步失敗", true);
+    } finally {
+      this.syncingFromSupabase = false;
+      if (this.pendingSupabaseSync) {
+        this.pendingSupabaseSync = false;
+        this.queueSupabaseSync();
+      }
     }
+  }
+
+  /** Starts simple polling so other users' updates appear without a refresh. */
+  startSupabasePolling() {
+    clearInterval(this.supabasePollTimer);
+    if (!this.supabaseEnabled) {
+      this.setSyncStatus("使用本機模式", false);
+      return;
+    }
+    this.supabasePollTimer = setInterval(() => {
+      this.syncFromSupabase({ force: false, showToast: false });
+    }, 10000);
+  }
+
+  /** Returns true when a user is currently typing or editing a form field. */
+  isEditingForm() {
+    if (document.querySelector("dialog[open]")) return true;
+    const active = document.activeElement;
+    if (!active) return false;
+    const tag = active.tagName;
+    const editable = ["INPUT", "TEXTAREA", "SELECT"].includes(tag) || active.isContentEditable;
+    return editable && Boolean(active.closest("form"));
+  }
+
+  /** Records the current sync status and optionally shows it as a toast. */
+  setSyncStatus(status, showToast = false) {
+    this.syncStatus = status;
+    if (showToast) this.toast(status);
   }
 
   /** Imports Excel-generated finance rows once and merges them by project code. */
@@ -616,7 +759,14 @@ class ESGApp {
 
   /** Debounces full-state Supabase synchronization. */
   queueSupabaseSync() {
-    if (!this.supabaseEnabled || this.syncingToSupabase) return;
+    if (!this.supabaseEnabled) {
+      this.setSyncStatus("使用本機模式", false);
+      return;
+    }
+    if (this.syncingToSupabase || this.syncingFromSupabase) {
+      this.pendingSupabaseSync = true;
+      return;
+    }
     clearTimeout(this.supabaseSyncTimer);
     this.supabaseSyncTimer = setTimeout(() => this.syncToSupabase(), 500);
   }
@@ -625,13 +775,20 @@ class ESGApp {
   async syncToSupabase() {
     if (!this.supabaseEnabled) return;
     try {
+      this.supabaseSyncTimer = null;
       this.syncingToSupabase = true;
+      this.setSyncStatus("同步中", false);
       await this.supabaseStore.saveData(this.state);
+      this.setSyncStatus("已同步", false);
     } catch (error) {
       console.warn(error);
-      this.toast("Supabase 同步失敗，資料已保留在 LocalStorage");
+      this.setSyncStatus("同步失敗", true);
     } finally {
       this.syncingToSupabase = false;
+      if (this.pendingSupabaseSync) {
+        this.pendingSupabaseSync = false;
+        this.queueSupabaseSync();
+      }
     }
   }
 
@@ -653,7 +810,13 @@ class ESGApp {
     this.supabaseEnabled = this.supabaseStore.isConfigured();
     this.dom.databaseModal.close();
     this.toast(this.supabaseEnabled ? "Supabase 設定已儲存" : "已使用 LocalStorage 模式");
-    await this.loadFromSupabaseIfConfigured();
+    if (this.supabaseEnabled) {
+      await this.syncFromSupabase({ force: true, showToast: true });
+      this.startSupabasePolling();
+    } else {
+      clearInterval(this.supabasePollTimer);
+      this.setSyncStatus("使用本機模式", true);
+    }
   }
 
   /** Clears Supabase settings and keeps LocalStorage fallback. */
@@ -662,9 +825,10 @@ class ESGApp {
     this.supabaseConfig = { url: "", anonKey: "" };
     this.supabaseStore = new SupabasePMISStore(this.supabaseConfig);
     this.supabaseEnabled = false;
+    clearInterval(this.supabasePollTimer);
     this.dom.supabaseUrlInput.value = "";
     this.dom.supabaseAnonKeyInput.value = "";
-    this.toast("已切回 LocalStorage 單機模式");
+    this.setSyncStatus("使用本機模式", true);
   }
 
   /** Imports current LocalStorage-compatible state into Supabase. */
@@ -678,12 +842,26 @@ class ESGApp {
       this.toast("請先填入 Supabase URL 與 Anon Key");
       return;
     }
+    const ok = await this.confirm(
+      "第一次匯入確認",
+      "此操作會將目前本機資料覆蓋到 Supabase，僅限第一次匯入使用。",
+      "確認覆蓋匯入"
+    );
+    if (!ok) return;
     try {
-      await store.migrateFromLocalStorage(this.state);
+      const sourceData = this.localMigrationSnapshot
+        ? this.migrate(JSON.parse(JSON.stringify(this.localMigrationSnapshot)))
+        : this.state;
+      await store.migrateFromLocalStorage(sourceData);
+      this.state = sourceData;
+      this.storage.save(this.state);
       this.storage.saveConfig(config);
       this.supabaseConfig = config;
       this.supabaseStore = store;
       this.supabaseEnabled = true;
+      this.startSupabasePolling();
+      this.setSyncStatus("已同步", false);
+      this.renderAll();
       this.toast("LocalStorage 資料已匯入 Supabase");
     } catch (error) {
       console.warn(error);
@@ -758,6 +936,9 @@ class ESGApp {
     this.dom.sidebar.classList.remove("open");
     if (view === "dashboard") this.renderDashboard();
     if (view === "calendar") this.renderCalendar();
+    if (["dashboard", "calendar", "projects"].includes(view)) {
+      this.syncFromSupabase({ force: false, showToast: false });
+    }
   }
 
   /** Toggles light and dark theme. */
@@ -2219,8 +2400,8 @@ class ESGApp {
     this.state.projects = this.state.projects.filter(item => item.id !== project.id);
     if (this.selectedProjectId === project.id) this.selectedProjectId = null;
     this.closeProjectDetail();
-    this.switchView("projects");
     this.save();
+    this.switchView("projects");
     this.renderAll();
   }
 
