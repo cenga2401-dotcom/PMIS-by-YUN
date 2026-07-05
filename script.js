@@ -315,8 +315,8 @@ class ESGApp {
     const startup = this.supabaseEnabled
       ? this.syncFromSupabase({ force: true, showToast: true })
       : Promise.resolve(this.setSyncStatus("使用本機模式", true));
-    startup.finally(() => {
-      this.importFinanceRowsFromExcel();
+    startup.finally(async () => {
+      await this.importFinanceRowsFromExcel();
       this.startSupabasePolling();
       setTimeout(() => this.dom.loading.classList.add("hidden"), 350);
     });
@@ -679,40 +679,74 @@ class ESGApp {
   }
 
   /** Imports Excel-generated finance rows once and merges them by project code. */
-  importFinanceRowsFromExcel() {
+  async importFinanceRowsFromExcel() {
     const rows = window.PMIS_FINANCE_IMPORT;
     if (!Array.isArray(rows) || !rows.length) return;
     const version = window.PMIS_FINANCE_IMPORT_VERSION || `finance-${rows.length}`;
-    const flagKey = `${this.storage.key}.financeImport.${version}`;
-    if (localStorage.getItem(flagKey)) return;
+    const legacyFlagKey = `${this.storage.key}.financeImport.${version}`;
+    const localFlagKey = `${this.storage.key}.financeImport.local.${version}`;
+    const supabaseFlagKey = `${this.storage.key}.financeImport.supabase.${version}`;
+    const importedLocally = localStorage.getItem(localFlagKey) || localStorage.getItem(legacyFlagKey);
+    const importedToSupabase = localStorage.getItem(supabaseFlagKey);
+    if (!this.supabaseEnabled && importedLocally) return;
     let created = 0;
     let updated = 0;
+    let touched = 0;
     rows.forEach(row => {
       const code = String(row.code || "").trim();
       if (!code) return;
       const project = this.state.projects.find(item => String(item.code || "").trim().toLowerCase() === code.toLowerCase());
       if (project) {
-        this.mergeFinanceRowIntoProject(project, row);
-        this.addActivityLog(project, "project_updated", "匯入財務資料", "由 Excel 匯入專案總額、已收金額、未收金額", { source: "excel_finance_import" });
-        updated += 1;
+        const changed = this.mergeFinanceRowIntoProject(project, row);
+        if (changed || this.supabaseEnabled) {
+          this.addActivityLog(project, "project_updated", "匯入財務資料", "由 Excel 匯入專案總額、已收金額、未收金額", { source: "excel_finance_import", version });
+          updated += 1;
+        }
+        if (this.supabaseEnabled) touched += 1;
         return;
       }
       const importedProject = this.createProjectFromFinanceRow(row);
       this.addActivityLog(importedProject, "project_created", "建立案件", `由 Excel 匯入案件：「${importedProject.name}」`, { source: "excel_finance_import" });
       this.state.projects.push(importedProject);
       created += 1;
+      touched += 1;
     });
-    localStorage.setItem(flagKey, "1");
-    if (created || updated) {
+    if (created || updated || this.supabaseEnabled && touched) {
       this.state = this.migrate(this.state);
-      this.save(false);
+      this.storage.save(this.state);
       this.renderAll();
-      this.toast(`已匯入 Excel 金額資料：新增 ${created} 筆，更新 ${updated} 筆`);
+      localStorage.setItem(localFlagKey, "1");
+      if (this.supabaseEnabled) {
+        clearTimeout(this.supabaseSyncTimer);
+        this.supabaseSyncTimer = null;
+        const synced = await this.syncToSupabase();
+        if (synced) {
+          localStorage.setItem(supabaseFlagKey, "1");
+          this.toast(`已匯入 Excel 並同步 Supabase：新增 ${created} 筆，更新 ${updated} 筆`);
+        } else {
+          this.toast("Excel 已匯入本機，但 Supabase 同步失敗，重新整理後會再嘗試");
+        }
+      } else {
+        this.toast(`已匯入 Excel 金額資料：新增 ${created} 筆，更新 ${updated} 筆`);
+      }
     }
   }
 
   /** Applies one imported finance row to an existing project without deleting user edits. */
   mergeFinanceRowIntoProject(project, row) {
+    const before = JSON.stringify({
+      totalAmount: this.toNumber(project.totalAmount),
+      receivedAmount: this.toNumber(project.receivedAmount),
+      unreceivedAmount: this.toNumber(project.unreceivedAmount),
+      paymentProgress: project.paymentProgress || "",
+      contractPeriod: project.contractPeriod || "",
+      client: project.client || "",
+      name: project.name || "",
+      type: project.type || "",
+      owner: project.owner || "",
+      startDate: project.startDate || "",
+      dueDate: project.dueDate || ""
+    });
     project.totalAmount = this.toNumber(row.totalAmount);
     project.receivedAmount = this.toNumber(row.receivedAmount);
     project.unreceivedAmount = this.toNumber(row.unreceivedAmount);
@@ -724,6 +758,20 @@ class ESGApp {
     if (!project.owner && row.owner) project.owner = row.owner;
     if (!project.startDate && row.startDate) project.startDate = row.startDate;
     if (!project.dueDate && row.dueDate) project.dueDate = row.dueDate;
+    const after = JSON.stringify({
+      totalAmount: this.toNumber(project.totalAmount),
+      receivedAmount: this.toNumber(project.receivedAmount),
+      unreceivedAmount: this.toNumber(project.unreceivedAmount),
+      paymentProgress: project.paymentProgress || "",
+      contractPeriod: project.contractPeriod || "",
+      client: project.client || "",
+      name: project.name || "",
+      type: project.type || "",
+      owner: project.owner || "",
+      startDate: project.startDate || "",
+      dueDate: project.dueDate || ""
+    });
+    return before !== after;
   }
 
   /** Creates a LocalStorage-compatible project from one imported finance row. */
@@ -773,16 +821,18 @@ class ESGApp {
 
   /** Writes the current state into Supabase. */
   async syncToSupabase() {
-    if (!this.supabaseEnabled) return;
+    if (!this.supabaseEnabled) return false;
     try {
       this.supabaseSyncTimer = null;
       this.syncingToSupabase = true;
       this.setSyncStatus("同步中", false);
       await this.supabaseStore.saveData(this.state);
       this.setSyncStatus("已同步", false);
+      return true;
     } catch (error) {
       console.warn(error);
       this.setSyncStatus("同步失敗", true);
+      return false;
     } finally {
       this.syncingToSupabase = false;
       if (this.pendingSupabaseSync) {
@@ -812,6 +862,7 @@ class ESGApp {
     this.toast(this.supabaseEnabled ? "Supabase 設定已儲存" : "已使用 LocalStorage 模式");
     if (this.supabaseEnabled) {
       await this.syncFromSupabase({ force: true, showToast: true });
+      await this.importFinanceRowsFromExcel();
       this.startSupabasePolling();
     } else {
       clearInterval(this.supabasePollTimer);
